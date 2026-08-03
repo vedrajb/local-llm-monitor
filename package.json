@@ -1,0 +1,17 @@
+{
+  "name": "local-llm-monitor",
+  "version": "1.0.0",
+  "description": "Zero-dependency terminal monitor for a local vLLM server (+ NVIDIA GPU): GPU utilization, VRAM, request queue, KV/prefix cache, and token throughput.",
+  "type": "module",
+  "bin": {
+    "llm-monitor": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "once": "node src/index.js --once"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
