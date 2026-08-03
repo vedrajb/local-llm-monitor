@@ -334,6 +334,73 @@ started with `--api-key`.
 
 ---
 
+## Restarting after a reboot
+
+Nothing needs reinstalling. The venv, the model cache, and the `~/.bashrc`
+exports all survive a restart. Only the **virtualenv activation** does not,
+because activation is per-shell state.
+
+Symptom in a fresh terminal:
+
+```
+$ vllm serve Qwen/Qwen3-8B-FP8 ...
+vllm: command not found
+```
+
+This means `~/vllm-env/bin` is not on `PATH` — not that anything is damaged.
+Confirm the install is intact rather than assuming breakage:
+
+```bash
+ls -la ~/vllm-env/bin/vllm && echo "VIRTUAL_ENV=${VIRTUAL_ENV:-unset}" && env | grep -E "VLLM_|HF_HOME"
+```
+
+A healthy post-restart state shows the launcher present, `VIRTUAL_ENV=unset`,
+and all three exports still set. Fix:
+
+```bash
+cd ~ && source ~/vllm-env/bin/activate
+```
+
+The prompt shows `(vllm-env)` once active. Then run the Step 8 serve command
+unchanged.
+
+### Always `cd ~` first
+
+Do not launch from `/mnt/c/...`. That path is the Windows filesystem bridge and
+is slow for the file I/O vLLM does at startup. The weights
+(`~/.cache/huggingface`) and compile cache (`~/.cache/vllm`) live in the Linux
+home regardless of the launch directory, so there is nothing to gain by running
+from the Windows side.
+
+### Skipping activation
+
+Activation is a convenience, not a requirement — the venv's Python is baked into
+the launcher's shebang, so the full path works directly:
+
+```bash
+~/vllm-env/bin/vllm serve Qwen/Qwen3-8B-FP8 --host 0.0.0.0 --port 8000 --gpu-memory-utilization 0.88 --max-model-len 16384 --served-model-name local-llm
+```
+
+### One-command restart
+
+```bash
+echo "alias vllm-up='cd ~ && source ~/vllm-env/bin/activate && vllm serve Qwen/Qwen3-8B-FP8 --host 0.0.0.0 --port 8000 --gpu-memory-utilization 0.88 --max-model-len 16384 --served-model-name local-llm'" >> ~/.bashrc && source ~/.bashrc
+```
+
+Then `vllm-up` after any reboot.
+
+Prefer this over appending `source ~/vllm-env/bin/activate` to `~/.bashrc`.
+Auto-activating in every shell means any later `pip install` silently lands in
+the vLLM venv, which is how environments get polluted. An alias keeps
+activation explicit.
+
+### Expected on the first post-restart boot
+
+Weights load from cache — no re-download. CUDA graph capture still runs (~1–2
+min); it is never cached to disk.
+
+---
+
 ## Verified `/metrics` mapping
 
 ```bash
