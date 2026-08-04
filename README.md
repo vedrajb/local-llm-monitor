@@ -1,16 +1,22 @@
 # Local LLM Monitor
 
-A zero-dependency Node script (Node 18+) that monitors a local **vLLM** server
-alongside the **NVIDIA** GPU it runs on, and prints a plain-text snapshot on an
-interval. No `npm install` — it uses only Node built-ins plus `nvidia-smi`.
+A zero-dependency Node script (Node 18+) that monitors a local LLM hosting
+platform alongside the **NVIDIA** GPU it runs on, and prints a plain-text
+snapshot on an interval. No `npm install` — it uses only Node built-ins plus
+`nvidia-smi`.
+
+The hosting platform is chosen at startup through a pluggable provider
+(factory pattern). **Currently supported platforms:**
+
+- **vLLM**
 
 It reads:
 
 - **GPU** (via `nvidia-smi`) — utilization, memory-bandwidth util, VRAM
   used/total, temperature, power.
-- **vLLM** (via the OpenAI-compatible API + Prometheus `/metrics`) — the served
-  model, request queue (running / waiting), KV-cache occupancy, prefix-cache hit
-  rate, and token throughput (input + output).
+- **Platform** (via the OpenAI-compatible API + Prometheus `/metrics`) — the
+  served model, request queue (running / waiting), KV-cache occupancy,
+  prefix-cache hit rate, and token throughput (input + output).
 
 Throughput is derived from vLLM's cumulative token counters
 (`vllm:prompt_tokens_total`, `vllm:generation_tokens_total`) as a rate between
@@ -24,12 +30,16 @@ node src/index.js          # live, refreshes every 2s
 node src/index.js --once   # takes two samples ~1.5s apart, prints, exits
 ```
 
-Stop the live view with `Ctrl-C`.
+On startup you're prompted to select a hosting platform (skipped when only one
+platform is available, when `--platform` / `LLM_PLATFORM` is set, in `--once`
+mode, or when there's no interactive terminal). Stop the live view with
+`Ctrl-C`.
 
 ## Options
 
 | Flag | Default | Description |
 |---|---|---|
+| `--platform KEY` | prompt / first | Platform to monitor, e.g. `vllm` (also `LLM_PLATFORM` env) |
 | `--vllm-host URL` | `http://localhost:8000` | vLLM base URL (also `VLLM_HOST` env) |
 | `--interval MS` | `2000` | Refresh / sampling interval |
 | `--once` | — | Print a single snapshot and exit |
@@ -59,6 +69,15 @@ vLLM (http://localhost:8000)
 - vLLM metric names change between releases. These were verified against vLLM
   0.26.0 (see `vllm-setup-windows-wsl2.md`); re-grep `/metrics` if a value reads
   as `—`.
+
+## Adding a platform
+
+Platforms are resolved through a factory in `src/index.js`. To add one,
+implement a provider class with an async `poll()` method that returns the same
+result shape (`ok`, `models`, `running`, `waiting`, `kvUsage`, `cacheHitRate`,
+`promptRate`, `decodeRate`) and a `label`/`host`, then add an entry to the
+`PLATFORMS` registry. The startup selector and `--platform` flag pick it up
+automatically.
 
 ## Terminal note
 

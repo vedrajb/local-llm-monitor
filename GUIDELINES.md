@@ -1,0 +1,1 @@
+- always update README.md if there is any command line usage change
