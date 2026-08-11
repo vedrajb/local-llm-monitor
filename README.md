@@ -33,9 +33,28 @@ spiking on a single short window.
 ## Run
 
 ```bash
-node src/index.js          # live, refreshes every 2s
-node src/index.js --once   # takes two samples ~1.5s apart, prints, exits
+npm start                  # live TUI, refreshes every 2s
+npm run ollama             # live TUI, skip the platform prompt
+npm run vllm               # live TUI, skip the platform prompt
+npm run plain              # live plain text instead of the TUI
+npm run once               # two samples ~1.5s apart, prints, exits
+npm run once:ollama        # single snapshot of a specific platform
+npm run once:vllm
 ```
+
+Equivalent to running the script directly:
+
+```bash
+node src/index.js                    # live TUI
+node src/index.js --plain            # live plain text
+node src/index.js --once             # takes two samples ~1.5s apart, prints, exits
+node src/index.js --platform ollama  # skip the platform prompt
+```
+
+The live view is a **TUI** (boxes, gauges, sparklines). It automatically falls
+back to plain text when output is not a terminal (piped or redirected), when
+`NO_COLOR` or `TERM=dumb` is set, in `--once` mode, or with `--plain` — so
+scripting and logging keep the same plain output as before.
 
 On startup you're prompted to select a hosting platform (skipped when only one
 platform is available, when `--platform` / `LLM_PLATFORM` is set, in `--once`
@@ -51,9 +70,42 @@ mode, or when there's no interactive terminal). Stop the live view with
 | `--ollama-host URL` | `http://localhost:11434` | Ollama base URL (also `OLLAMA_HOST` env; a missing `http://` is added) |
 | `--ollama-log PATH` | platform default | Ollama `server.log` to read throughput from (also `OLLAMA_LOG` env) |
 | `--interval MS` | `2000` | Refresh / sampling interval |
+| `--plain` | — | Plain text instead of the TUI (also automatic when piped / `NO_COLOR`) |
 | `--once` | — | Print a single snapshot and exit |
 
 ## Example output
+
+The default live TUI (colour omitted here — severity is colour-coded green /
+amber / red, and `trend` sparklines show the recent history):
+
+```
+  Local LLM Monitor  Ollama · http://localhost:11434  ● 11:33:01 am · 2s
+
+┌─ GPU0  NVIDIA GeForce RTX 5080 Laptop GPU ───────────────────────────┐
+│ util   ████████████████████▊· 94%    trend ▁▃▅▇████▆▄▂▁▂▅███▇▄
+│ memBW  ████████████████▋····· 76%
+│ VRAM   █████████████████▉···· 14.1 GB/15.9 GB
+│ temp 81°C   power 148W
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Model ──────────────────────────────────────────────────────────────┐
+│ qwen3:8b-q8_0  8.2B Q8_0  12.7 GB loaded (12.7 GB VRAM)
+│ placement 100% GPU   context 16384   until forever
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Runtime ────────────────────────────────────────────────────────────┐
+│ slots     ████████████···· 3/4 busy
+│ KV cache  ▋··············· 4%   (2832/65536 tok)
+│ reuse     ███████████████▌ 97%  of last prompt (37/38 tok)
+│ prompts   ███············· 24 cached · 1552/8192 MiB RAM
+└──────────────────────────────────────────────────────────────────────┘
+┌─ Throughput  (last completed request) ───────────────────────────────┐
+│ prefill 687.1 tok/s (23 tok)    decode 65.9 tok/s (120 tok)
+│ decode trend ▄▆▆▇▇▇▆▇▇▇▇▇
+└──────────────────────────────────────────────────────────────────────┘
+
+  Ctrl-C to exit
+```
+
+Plain text (`--plain`, `--once`, or when piped):
 
 ```
 === Local LLM Monitor (vLLM) === 4:30:03 pm
@@ -170,5 +222,13 @@ when it is merely unobservable.
 
 ## Terminal note
 
-The live view clears the screen and reprints each tick (no alternate-screen
-buffer or raw input), so it works in any terminal, including Git Bash / MinTTY.
+Neither view uses the alternate-screen buffer or raw keyboard input, so both
+work in any terminal, including Git Bash / MinTTY (where `setRawMode` is
+unavailable). `Ctrl-C` exits.
+
+- The **TUI** homes the cursor and clears each line as it rewrites it, so the
+  redraw does not flash. It reads `process.stdout.columns` on every frame and
+  reflows on resize, clamping to 120 columns so gauges stay readable on a wide
+  window; below ~30 columns content is truncated rather than wrapped.
+- The **plain** view clears the screen and reprints each tick, exactly as
+  before.

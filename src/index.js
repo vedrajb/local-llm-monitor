@@ -25,6 +25,7 @@ import { stdin, stdout } from 'node:process';
 import { open, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { renderTui } from './tui.js';
 
 const args = process.argv.slice(2);
 function opt(name, def) {
@@ -40,6 +41,7 @@ const OLLAMA_HOST = opt('--ollama-host', process.env.OLLAMA_HOST || 'http://loca
 const OLLAMA_LOG = opt('--ollama-log', process.env.OLLAMA_LOG || null);
 const INTERVAL = parseInt(opt('--interval', '2000'), 10);
 const ONCE = args.includes('--once');
+const PLAIN = args.includes('--plain');
 const PLATFORM = opt('--platform', process.env.LLM_PLATFORM || null);
 
 // ---- helpers ----------------------------------------------------------
@@ -491,8 +493,12 @@ async function selectPlatform() {
 }
 
 // ---- render -----------------------------------------------------------
-async function snapshot(provider) {
-  const [gpus, v] = await Promise.all([nvidiaSmi(), provider.poll()]);
+function collect(provider) {
+  return Promise.all([nvidiaSmi(), provider.poll()]);
+}
+
+async function snapshot(provider, sampled) {
+  const [gpus, v] = sampled || (await collect(provider));
   const L = [];
   L.push(`=== Local LLM Monitor (${provider.label}) === ${new Date().toLocaleTimeString()}`);
 
@@ -580,9 +586,44 @@ async function snapshot(provider) {
   return L.join('\n');
 }
 
+// The TUI needs a TTY for its width and colours; anything else (a pipe, a
+// redirect, NO_COLOR, --plain, --once) falls back to the plain renderer.
+const USE_TUI =
+  !PLAIN && !ONCE && !!process.stdout.isTTY && !('NO_COLOR' in process.env) && process.env.TERM !== 'dumb';
+
+// Bounded so a long-running session cannot grow without limit.
+const HISTORY_MAX = 60;
+const history = { gpuUtil: [], memBW: [], decodeRate: [] };
+function track(key, value) {
+  if (value == null || Number.isNaN(value)) return;
+  const arr = history[key];
+  arr.push(value);
+  if (arr.length > HISTORY_MAX) arr.shift();
+}
+
+let lastFrame = '';
+function paint(text) {
+  lastFrame = text;
+  if (!USE_TUI) return process.stdout.write('\x1b[2J\x1b[H' + text + '\n');
+  // Home the cursor and clear each line as it is rewritten, then clear whatever
+  // is left below: no full-screen erase, so the redraw does not flash.
+  const body = text.split('\n').join('\x1b[K\n');
+  process.stdout.write('\x1b[H' + body + '\x1b[K\x1b[J');
+}
+
 async function loop(provider) {
-  const text = await snapshot(provider);
-  process.stdout.write('\x1b[2J\x1b[H' + text + '\n');
+  const sampled = await collect(provider);
+  const [gpus, v] = sampled;
+  if (USE_TUI) {
+    if (gpus && gpus.length) {
+      track('gpuUtil', gpus[0].gpuUtil);
+      track('memBW', gpus[0].memUtil);
+    }
+    track('decodeRate', v.loaded ? v.lastRequest?.decodeRate : v.decodeRate);
+    paint(renderTui(provider, gpus, v, history, { gb, pct, rate, interval: INTERVAL }));
+  } else {
+    paint(await snapshot(provider, sampled));
+  }
 }
 
 // ---- startup ----------------------------------------------------------
@@ -597,5 +638,12 @@ if (ONCE) {
 }
 
 process.on('SIGINT', () => process.exit(0));
+// Reflow immediately on resize instead of waiting for the next poll.
+if (USE_TUI) {
+  process.stdout.write('\x1b[2J');
+  process.stdout.on('resize', () => {
+    if (lastFrame) paint(lastFrame);
+  });
+}
 await loop(provider);
 setInterval(() => loop(provider), INTERVAL);
