@@ -18,6 +18,7 @@
 //
 // Usage:  node src/index.js [--platform KEY] [--vllm-host URL] [--ollama-host URL]
 //                           [--ollama-log PATH] [--interval MS] [--once]
+//                           [--no-keep-awake]
 
 import { spawn } from 'node:child_process';
 import readline from 'node:readline/promises';
@@ -26,6 +27,7 @@ import { open, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { renderTui } from './tui.js';
+import { startKeepAwake, stopKeepAwake, isKeepAwakeActive } from './keep-awake.js';
 
 const args = process.argv.slice(2);
 function opt(name, def) {
@@ -43,6 +45,7 @@ const INTERVAL = parseInt(opt('--interval', '2000'), 10);
 const ONCE = args.includes('--once');
 const PLAIN = args.includes('--plain');
 const PLATFORM = opt('--platform', process.env.LLM_PLATFORM || null);
+const KEEP_AWAKE = !args.includes('--no-keep-awake');
 
 // ---- helpers ----------------------------------------------------------
 function gb(bytes) {
@@ -611,6 +614,71 @@ function paint(text) {
   process.stdout.write('\x1b[H' + body + '\x1b[K\x1b[J');
 }
 
+// ---- keep-awake toggle ------------------------------------------------
+const KEEP_AWAKE_KEY = 'k';
+let keepAwakeOn = false;
+let keysBound = false;
+
+// keepAwakeOn is the requested state; isKeepAwakeActive() is whether an
+// inhibitor is really being held. Reporting the two separately means the footer
+// cannot claim the machine is being held awake when the helper has died.
+function setKeepAwake(on) {
+  keepAwakeOn = on;
+  if (on) startKeepAwake();
+  else stopKeepAwake();
+  return isKeepAwakeActive();
+}
+
+// Raw mode is what turns a keypress into a readable byte without waiting for
+// Enter, and it is unavailable in some terminals (MinTTY), so the shortcut is
+// offered only where it can work — elsewhere the monitor behaves as before and
+// the footer omits the key. In raw mode Ctrl-C stops raising SIGINT and arrives
+// as data instead, so it is handled here to keep exiting to work.
+function bindKeys() {
+  if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') return false;
+  try {
+    stdin.setRawMode(true);
+  } catch {
+    return false;
+  }
+  stdin.resume();
+  stdin.setEncoding('utf8');
+  process.on('exit', () => {
+    try {
+      stdin.setRawMode(false);
+    } catch {}
+  });
+  stdin.on('data', (chunk) => {
+    for (const key of chunk) {
+      if (key === '\x03') process.exit(0);
+      else if (key.toLowerCase() === KEEP_AWAKE_KEY) {
+        setKeepAwake(!keepAwakeOn);
+        renderFrame();
+      }
+    }
+  });
+  return true;
+}
+
+let lastSample = null;
+function renderFrame() {
+  if (!lastSample) return;
+  const [gpus, v] = lastSample;
+  paint(
+    renderTui(provider, gpus, v, history, {
+      gb,
+      pct,
+      rate,
+      interval: INTERVAL,
+      keepAwake: {
+        on: isKeepAwakeActive(),
+        unavailable: keepAwakeOn && !isKeepAwakeActive(),
+        key: keysBound ? KEEP_AWAKE_KEY : null,
+      },
+    })
+  );
+}
+
 async function loop(provider) {
   const sampled = await collect(provider);
   const [gpus, v] = sampled;
@@ -620,7 +688,8 @@ async function loop(provider) {
       track('memBW', gpus[0].memUtil);
     }
     track('decodeRate', v.loaded ? v.lastRequest?.decodeRate : v.decodeRate);
-    paint(renderTui(provider, gpus, v, history, { gb, pct, rate, interval: INTERVAL }));
+    lastSample = sampled;
+    renderFrame();
   } else {
     paint(await snapshot(provider, sampled));
   }
@@ -638,12 +707,14 @@ if (ONCE) {
 }
 
 process.on('SIGINT', () => process.exit(0));
+if (KEEP_AWAKE) setKeepAwake(true);
 // Reflow immediately on resize instead of waiting for the next poll.
 if (USE_TUI) {
   process.stdout.write('\x1b[2J');
   process.stdout.on('resize', () => {
     if (lastFrame) paint(lastFrame);
   });
+  keysBound = bindKeys();
 }
 await loop(provider);
 setInterval(() => loop(provider), INTERVAL);

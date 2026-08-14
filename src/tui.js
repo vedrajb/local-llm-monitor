@@ -100,6 +100,20 @@ function col(s, n) {
   return s + ' '.repeat(Math.max(0, n - visible(s)));
 }
 
+function footerLines(ka) {
+  const parts = [];
+  if (ka) {
+    const state = ka.unavailable
+      ? `${WARN}unavailable${RESET}`
+      : ka.on
+        ? `${OK}on${RESET}`
+        : `${MUTE}off${RESET}`;
+    parts.push(`${ka.key ? `${BOLD}${ka.key}${RESET} ` : ''}${MUTE}keep-awake${RESET} ${state}`);
+  }
+  parts.push(`${MUTE}Ctrl-C to exit${RESET}`);
+  return ['', fit(`  ${parts.join(`${MUTE}  ·  ${RESET}`)}`, termWidth()), ''];
+}
+
 export function renderTui(provider, gpus, v, history, opts = {}) {
   const { gb, pct, rate, interval } = opts;
   const L = [];
@@ -143,7 +157,7 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
   // ---- server ----
   if (!v.ok) {
     L.push(...box(provider.label, [`${BAD}server not reachable${RESET} ${MUTE}(${v.error})${RESET}`], BAD));
-    L.push('');
+    L.push(...footerLines(opts.keepAwake));
     return L.join('\n');
   }
 
@@ -245,8 +259,6 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
     L.push(...box('Throughput', tp, WARN));
   }
 
-  L.push('');
-  L.push(fit(`  ${MUTE}Ctrl-C to exit${RESET}`, termWidth()));
-  L.push('');
+  L.push(...footerLines(opts.keepAwake));
   return L.join('\n');
 }
