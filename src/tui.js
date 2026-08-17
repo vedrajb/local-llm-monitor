@@ -169,14 +169,22 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
       lines.push(
         `${BOLD}${m.id}${RESET}` +
           (m.params ? `  ${MUTE}${m.params}${m.quant ? ` ${m.quant}` : ''}${RESET}` : '') +
-          `  ${gb(m.size)} ${MUTE}loaded (${gb(m.vram)} VRAM)${RESET}`
+          `  ${gb(m.size)} ${MUTE}loaded${m.vram != null ? ` (${gb(m.vram)} VRAM)` : ''}${RESET}`
       );
       const gpuResident = m.placement === '100% GPU';
-      lines.push(
-        `${MUTE}placement${RESET} ${gpuResident ? OK : WARN}${m.placement ?? '—'}${RESET}` +
-          (m.context != null ? `   ${MUTE}context${RESET} ${m.context}` : '') +
-          (m.until ? `   ${MUTE}until${RESET} ${m.until}` : '')
-      );
+      // llama.cpp does not report VRAM residency over HTTP, so its placement is
+      // omitted rather than rendered as unknown.
+      const detail = [
+        m.placement != null || m.vram != null
+          ? `${MUTE}placement${RESET} ${gpuResident ? OK : WARN}${m.placement ?? '—'}${RESET}`
+          : null,
+        m.context != null
+          ? `${MUTE}context${RESET} ${m.context}` +
+            (m.contextTrain ? `${MUTE}/${m.contextTrain} trained${RESET}` : '')
+          : null,
+        m.until ? `${MUTE}until${RESET} ${m.until}` : null,
+      ].filter(Boolean);
+      if (detail.length) lines.push(detail.join('   '));
     }
     L.push(...box('Model', lines, OK));
   } else if (v.models.length) {
@@ -196,6 +204,13 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
   const bars = 16;
   if (v.loaded) {
     const rt = [];
+    // Only llama.cpp reports these; Ollama's queue depth is not observable.
+    if (v.running != null || v.waiting != null) {
+      rt.push(
+        `${col('requests', 10)}${BOLD}${v.running ?? '—'}${RESET} ${MUTE}processing${RESET}   ` +
+          `${MUTE}deferred${RESET} ${BOLD}${v.waiting ?? '—'}${RESET}`
+      );
+    }
     if (v.slots) {
       const frac = v.slots.total ? v.slots.busy / v.slots.total : 0;
       rt.push(
@@ -204,12 +219,12 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
     }
     if (v.kv) {
       rt.push(
-        `${col('KV cache', 10)}${gauge(v.kv.pct / 100, bars, sevColor(v.kv.pct))} ${BOLD}${col(pct(v.kv.pct), 5)}${RESET} ${MUTE}(${v.kv.used}/${v.kv.total} tok)${RESET}`
+        `${col('KV cache', 10)}${gauge(v.kv.pct / 100, bars, sevColor(v.kv.pct))} ${BOLD}${col(pct(v.kv.pct), 5)}${RESET} ${MUTE}(${v.kv.used}/${v.kv.total} tok${v.peakTokens ? ` · peak ${v.peakTokens}` : ''})${RESET}`
       );
     }
     if (v.cacheHit) {
       rt.push(
-        `${col('reuse', 10)}${gauge(v.cacheHit.pct / 100, bars, OK)} ${BOLD}${col(pct(v.cacheHit.pct), 5)}${RESET} ${MUTE}of last prompt (${v.cacheHit.cached}/${v.cacheHit.prompt} tok)${RESET}`
+        `${col('reuse', 10)}${gauge(v.cacheHit.pct / 100, bars, OK)} ${BOLD}${col(pct(v.cacheHit.pct), 5)}${RESET} ${MUTE}${v.cacheHit.scope ?? 'of last prompt'} (${v.cacheHit.cached}/${v.cacheHit.prompt} tok)${RESET}`
       );
     }
     if (v.promptCache) {
@@ -232,12 +247,35 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
       if (history.decodeRate && history.decodeRate.length > 1) {
         tp.push(`${MUTE}decode trend${RESET} ${ACC}${spark(history.decodeRate)}${RESET}`);
       }
+    } else if (v.metricsDisabled) {
+      tp.push(
+        `${WARN}metrics endpoint disabled${RESET} ${MUTE}(restart llama-server with --metrics)${RESET}`
+      );
+    } else if (v.promptRate != null || v.decodeRate != null) {
+      tp.push(
+        `${MUTE}prefill${RESET} ${BOLD}${rate(v.promptRate)}${RESET}    ` +
+          `${MUTE}decode${RESET} ${BOLD}${rate(v.decodeRate)}${RESET}`
+      );
+      if (history.decodeRate && history.decodeRate.length > 1) {
+        tp.push(`${MUTE}decode trend${RESET} ${ACC}${spark(history.decodeRate)}${RESET}`);
+      }
+    } else if (v.metricsError) {
+      tp.push(`${WARN}throughput unavailable${RESET} ${MUTE}(/metrics ${v.metricsError})${RESET}`);
     } else if (v.logMissing) {
       tp.push(`${WARN}throughput unavailable${RESET} ${MUTE}(no server.log at ${v.logMissing})${RESET}`);
     } else {
       tp.push(`${MUTE}no completed request in recent log${RESET}`);
     }
-    L.push(...box('Throughput  (last completed request)', tp, WARN));
+    // Only llama.cpp mid-generation produces a live rate; every other source
+    // here — its committed gauge, Ollama's log figure — describes the request
+    // that finished most recently, so the heading is a straight either/or.
+    L.push(
+      ...box(
+        v.rateLive ? 'Throughput  (live)' : 'Throughput  (last completed request)',
+        tp,
+        WARN
+      )
+    );
   } else {
     L.push(
       ...box(

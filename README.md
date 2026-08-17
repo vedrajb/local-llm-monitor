@@ -10,6 +10,7 @@ The hosting platform is chosen at startup through a pluggable provider
 
 - **vLLM**
 - **Ollama**
+- **llama.cpp**
 
 It reads:
 
@@ -24,6 +25,17 @@ It reads:
   **slots**, **KV-cache** occupancy, **prefix reuse** on the last prompt, the
   host-RAM **prompt cache**, and the prefill/decode throughput of the last
   completed request.
+- **llama.cpp** (via Prometheus `/metrics` + `/props`, `/v1/models`, `/slots`) —
+  the loaded model with its parameter count, quant and context vs trained
+  context, requests processing / deferred, busy **slots**, **KV-cache**
+  occupancy with the peak sequence length seen, cumulative **prefix reuse**, and
+  a **live decode rate** differenced from `/slots` (llama.cpp's own gauges go
+  blank mid-generation), falling back to the server's figure for the last
+  completed request when idle. Requires
+  `llama-server --metrics`; without it everything except throughput still
+  reports, and the panel says which flag is missing. VRAM residency is not
+  exposed over HTTP, so there is no **placement** figure — read the `nvidia-smi`
+  VRAM gauge instead.
 
 ## Documentation
 
@@ -33,6 +45,7 @@ It reads:
   during a live watch, and how to turn that off.
 - **[ollama-setup-windows.md](ollama-setup-windows.md)** — Ollama host setup.
 - **[vllm-setup-windows-wsl2.md](vllm-setup-windows-wsl2.md)** — vLLM host setup.
+- **[llamacpp-setup-windows.md](llamacpp-setup-windows.md)** — llama.cpp host setup.
 
 ## Run
 
@@ -40,10 +53,12 @@ It reads:
 npm start                  # live TUI, refreshes every 2s
 npm run ollama             # live TUI, skip the platform prompt
 npm run vllm               # live TUI, skip the platform prompt
+npm run llamacpp           # live TUI, skip the platform prompt
 npm run plain              # live plain text instead of the TUI
 npm run once               # two samples ~1.5s apart, prints, exits
 npm run once:ollama        # single snapshot of a specific platform
 npm run once:vllm
+npm run once:llamacpp
 ```
 
 Equivalent to running the script directly:
@@ -75,10 +90,11 @@ and `--once` never engages it. Details in [keep-awake.md](keep-awake.md).
 
 | Flag | Default | Description |
 |---|---|---|
-| `--platform KEY` | prompt / first | Platform to monitor: `vllm` or `ollama` (also `LLM_PLATFORM` env) |
+| `--platform KEY` | prompt / first | Platform to monitor: `vllm`, `ollama` or `llamacpp` (also `LLM_PLATFORM` env) |
 | `--vllm-host URL` | `http://localhost:8000` | vLLM base URL (also `VLLM_HOST` env) |
 | `--ollama-host URL` | `http://localhost:11434` | Ollama base URL (also `OLLAMA_HOST` env; a missing `http://` is added) |
 | `--ollama-log PATH` | platform default | Ollama `server.log` to read throughput from (also `OLLAMA_LOG` env) |
+| `--llamacpp-host URL` | `http://localhost:8080` | llama.cpp base URL (also `LLAMACPP_HOST` env; a missing `http://` is added) |
 | `--interval MS` | `2000` | Refresh / sampling interval |
 | `--plain` | — | Plain text instead of the TUI (also automatic when piped / `NO_COLOR`) |
 | `--once` | — | Print a single snapshot and exit |
@@ -151,6 +167,37 @@ Ollama (http://localhost:11434)
   last request  prefill 687.1 tok/s (23 tok)  decode 65.9 tok/s (120 tok)
 ```
 
+```
+=== Local LLM Monitor (llama.cpp) === 4:19:10 pm
+
+GPU (nvidia-smi)
+  GPU0 NVIDIA GeForce RTX 5080 Laptop GPU  util 88%  memBW 71%  VRAM 13.4 GB/15.9 GB  59°C  121W
+
+llama.cpp (http://localhost:8080)
+  model qwen3-8b-q8  8.2B Q8_0  8.1 GB loaded
+  context 32768/40960 trained
+  requests  1 processing  0 deferred
+  slots  1/1 busy  KV cache 16% (5120/32768 tok, peak 5184)
+  prefix reuse 98% of all prompt tokens (4992/5120 tok)
+  throughput (live)  prefill 0.0 tok/s  decode 66.1 tok/s
+```
+
+Note the two llama.cpp-specific readings.
+
+**Throughput** is labelled `(live)` or `(last completed)`, and the difference
+matters. llama.cpp commits its Prometheus timings only when a request *finishes*,
+and the gauge is emptied by whichever client reads `/metrics` first — so through a
+long generation the gauge reads `0.0 tok/s` on every poll, and a browser sitting
+on the built-in web UI can silently steal the reading. Decode is therefore
+differenced from `/slots` `n_decoded`, which does climb live; that is the `(live)`
+figure, and it is immune to both problems. `prefill` has no live equivalent
+because it lands in one batch, so it reads `0.0` during decode — correctly, since
+nothing is being prefilled. When nothing is in flight the box falls back to the
+server's own figure for the last completed request.
+
+**Prefix reuse** is cumulative since the server started, not the last prompt,
+because `llamacpp:prompt_tokens_total` counts only the tokens actually evaluated.
+
 ## Interpreting the output
 
 Every number's source, what it actually measures, and the traps in reading it
@@ -160,11 +207,24 @@ hit *lowers* the prefill rate) are documented in **[metrics.md](metrics.md)**.
 ## Adding a platform
 
 Platforms are resolved through a factory in `src/index.js`. To add one,
-implement a provider class with an async `poll()` method that returns the same
-result shape (`ok`, `models`, `running`, `waiting`, `kvUsage`, `cacheHitRate`,
-`promptRate`, `decodeRate`) and a `label`/`host`, then add an entry to the
-`PLATFORMS` registry. The startup selector and `--platform` flag pick it up
-automatically.
+implement a provider class with a `label`/`host` and an async `poll()` returning
+the shared result shape, then add an entry to the `PLATFORMS` registry. The
+startup selector and `--platform` flag pick it up automatically.
+
+Both renderers branch on which fields are present rather than on the platform, so
+a provider reports only what its server can actually answer:
+
+- Always: `ok`, `error`, `models`.
+- Aggregate-counter style (vLLM): `running`, `waiting`, `kvUsage`,
+  `cacheHitRate`, `promptRate`, `decodeRate`.
+- Per-model style (Ollama, llama.cpp): `loaded[]` with `id`, `size`, `params`,
+  `quant`, `context`, and optionally `vram`, `placement`, `until`,
+  `contextTrain`; plus `slots`, `kv`, `cacheHit` (add `scope` when it is not the
+  last prompt), `peakTokens`, `promptCache`.
+- Throughput, first match wins: `lastRequest` (per request, from a log),
+  `metricsDisabled`, `promptRate`/`decodeRate` (plus `rateLive` when the rate is
+  sampled live rather than read off a completed request),
+  `metricsError`, `logMissing`.
 
 Any field the platform cannot supply may be left `null` — the `gb()` / `pct()` /
 `rate()` helpers render it as `—`, so the output never implies a metric is zero

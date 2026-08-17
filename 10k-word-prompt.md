@@ -38,3 +38,29 @@ for line in sys.stdin:
         print("-- load %.2fs  total %.2fs  reason %s" % (d.get("load_duration",0)/1e9, d.get("total_duration",0)/1e9, d.get("done_reason")))
 '
 ```
+
+## llama.cpp
+
+__URL__: http://localhost:8080
+
+```bash
+export PYTHONIOENCODING=utf-8 && curl -s -N http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"qwen3-8b-q8","messages":[{"role":"user","content":"explain stormlight archive in 10000 words."}],"temperature":0.7,"stream":true,"stream_options":{"include_usage":true},"chat_template_kwargs":{"enable_thinking":false},"max_tokens":4096}' | python -u -c '
+import sys, json
+fin = None
+for line in sys.stdin:
+    if not line.startswith("data: "): continue
+    body = line[6:].strip()
+    if body == "[DONE]": print(); break
+    d = json.loads(body)
+    for ch in d.get("choices", []):
+        t = ch.get("delta", {}).get("content")
+        if t: print(t, end="", flush=True)
+        if ch.get("finish_reason"): fin = ch["finish_reason"]
+    tm = d.get("timings")
+    if tm:
+        print("\n\n-- prompt %d tok in %.2fs = %.1f tok/s (%d cached)" % (tm.get("prompt_n",0), tm.get("prompt_ms",0)/1e3, tm.get("prompt_per_second") or 0, tm.get("cache_n",0)))
+        print("-- decode %d tok in %.2fs = %.1f tok/s" % (tm.get("predicted_n",0), tm.get("predicted_ms",0)/1e3, tm.get("predicted_per_second") or 0))
+    u = d.get("usage")
+    if u: print("-- total %d tok  reason %s" % (u.get("total_tokens",0), fin))
+'
+```
