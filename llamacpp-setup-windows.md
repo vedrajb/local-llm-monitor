@@ -333,20 +333,35 @@ For monitoring, prefer `/metrics` and `/slots` over timing
 There is no service and no background daemon — the process is the server. Close
 the window or Ctrl-C to stop it; VRAM is released on exit.
 
-A launcher worth keeping, `start-llamacpp.sh`:
+Use [start-llamacpp.bat](start-llamacpp.bat) in this repo, either double-clicked
+or from a shell:
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-exec llama-server \
-  -hf Qwen/Qwen3-8B-GGUF:Q8_0 \
-  --alias qwen3-8b-q8 \
-  --host 127.0.0.1 --port 8080 \
-  -c 32768 -ngl all -fa on --metrics
+cmd /c start-llamacpp.bat
 ```
 
-This relies on the permanent PATH entry from step 3, so it works from any
-directory — no `cd` needed, and the model comes from the cache.
+It relies on the permanent PATH entry from step 3 — and checks for it, so a
+missing entry produces a pointed message instead of `not recognized`. It works
+from any directory, and the model comes from the cache. Its Ollama counterpart is
+[start-ollama.bat](start-ollama.bat).
+
+### `-c` is the total pool, not the per-slot context
+
+This is the flag most likely to catch you out. `n_ctx_slot()` is
+`llama_n_ctx_seq()` — i.e. **`-c` divided by `-np`** — then capped at the model's
+trained context (40960 for Qwen3-8B). And `-np` defaults to `-1`, meaning *auto*.
+
+So a bare `-c 32768` may not give you a 32768-token slot at all; if auto picks 4
+slots you get four 8192-token slots. The launcher passes `-np 1` explicitly for
+that reason. Confirm what you actually got from the startup banner:
+
+```text
+srv    load_model: initializing, n_slots = 1, n_ctx_slot = 32768, kv_unified = 'false'
+```
+
+Verified on this machine: 1 slot × 32768 with f16 KV settled at **12626 MiB** of
+the 16303 MiB card — 8.11 GiB of weights plus ~4.2 GiB of KV and buffers, which
+matches the budget table above.
 
 To stop it from another shell:
 
