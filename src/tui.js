@@ -100,7 +100,7 @@ function col(s, n) {
   return s + ' '.repeat(Math.max(0, n - visible(s)));
 }
 
-function footerLines(ka) {
+function footerLines(ka, lid) {
   const parts = [];
   if (ka) {
     const state = ka.unavailable
@@ -109,6 +109,14 @@ function footerLines(ka) {
         ? `${OK}on${RESET}`
         : `${MUTE}off${RESET}`;
     parts.push(`${ka.key ? `${BOLD}${ka.key}${RESET} ` : ''}${MUTE}keep-awake${RESET} ${state}`);
+  }
+  if (lid) {
+    const state = lid.pending
+      ? `${WARN}awaiting admin…${RESET}`
+      : lid.on
+        ? `${WARN}do nothing${RESET}`
+        : `${MUTE}user setting${RESET}`;
+    parts.push(`${lid.key ? `${BOLD}${lid.key}${RESET} ` : ''}${MUTE}lid-close${RESET} ${state}`);
   }
   parts.push(`${MUTE}Ctrl-C to exit${RESET}`);
   return ['', fit(`  ${parts.join(`${MUTE}  ·  ${RESET}`)}`, termWidth()), ''];
@@ -157,7 +165,7 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
   // ---- server ----
   if (!v.ok) {
     L.push(...box(provider.label, [`${BAD}server not reachable${RESET} ${MUTE}(${v.error})${RESET}`], BAD));
-    L.push(...footerLines(opts.keepAwake));
+    L.push(...footerLines(opts.keepAwake, opts.lidAction));
     return L.join('\n');
   }
 
@@ -297,6 +305,6 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
     L.push(...box('Throughput', tp, WARN));
   }
 
-  L.push(...footerLines(opts.keepAwake));
+  L.push(...footerLines(opts.keepAwake, opts.lidAction));
   return L.join('\n');
 }

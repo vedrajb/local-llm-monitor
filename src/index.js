@@ -32,6 +32,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { renderTui } from './tui.js';
 import { startKeepAwake, stopKeepAwake, isKeepAwakeActive } from './keep-awake.js';
+import { disableLidAction, restoreLidAction, isLidActionDisabled } from './lid-action.js';
 
 const args = process.argv.slice(2);
 function opt(name, def) {
@@ -873,6 +874,26 @@ function setKeepAwake(on) {
   return isKeepAwakeActive();
 }
 
+// ---- lid-close-action override toggle --------------------------------
+const LID_ACTION_KEY = 'l';
+let lidActionOn = isLidActionDisabled();
+let lidActionPending = false;
+
+// Each toggle needs an elevated shell (a UAC prompt), so it is asynchronous
+// and can fail or be denied; lidActionOn is set from isLidActionDisabled()
+// afterwards rather than assumed, so the footer never claims a state that
+// was not actually reached.
+async function setLidAction(on) {
+  if (lidActionPending) return;
+  lidActionPending = true;
+  renderFrame();
+  if (on) await disableLidAction();
+  else await restoreLidAction();
+  lidActionOn = isLidActionDisabled();
+  lidActionPending = false;
+  renderFrame();
+}
+
 // Raw mode is what turns a keypress into a readable byte without waiting for
 // Enter, and it is unavailable in some terminals (MinTTY), so the shortcut is
 // offered only where it can work — elsewhere the monitor behaves as before and
@@ -898,6 +919,8 @@ function bindKeys() {
       else if (key.toLowerCase() === KEEP_AWAKE_KEY) {
         setKeepAwake(!keepAwakeOn);
         renderFrame();
+      } else if (key.toLowerCase() === LID_ACTION_KEY) {
+        setLidAction(!lidActionOn);
       }
     }
   });
@@ -918,6 +941,11 @@ function renderFrame() {
         on: isKeepAwakeActive(),
         unavailable: keepAwakeOn && !isKeepAwakeActive(),
         key: keysBound ? KEEP_AWAKE_KEY : null,
+      },
+      lidAction: {
+        on: lidActionOn,
+        pending: lidActionPending,
+        key: keysBound ? LID_ACTION_KEY : null,
       },
     })
   );
