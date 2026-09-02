@@ -39,13 +39,27 @@ It reads:
 
 ## Documentation
 
-- **[metrics.md](metrics.md)** — where every number comes from, what it measures,
+- **[metrics.md](docs/metrics.md)** — where every number comes from, what it measures,
   and how to read it.
-- **[keep-awake.md](keep-awake.md)** — how the machine is kept from idle-sleeping
+- **[keep-awake.md](docs/keep-awake.md)** — how the machine is kept from idle-sleeping
   during a live watch, and how to turn that off.
-- **[ollama-setup-windows.md](ollama-setup-windows.md)** — Ollama host setup.
-- **[vllm-setup-windows-wsl2.md](vllm-setup-windows-wsl2.md)** — vLLM host setup.
-- **[llamacpp-setup-windows.md](llamacpp-setup-windows.md)** — llama.cpp host setup.
+- **[ollama-setup-windows.md](docs/ollama-setup-windows.md)** — Ollama host setup.
+- **[vllm-setup-windows-wsl2.md](docs/vllm-setup-windows-wsl2.md)** — vLLM host setup,
+  including how to restart the server after a reboot.
+- **[llamacpp-setup-windows.md](docs/llamacpp-setup-windows.md)** — llama.cpp host setup.
+
+### Generating load
+
+An idle server reports zeros, so the queue, KV-cache and throughput panels only
+become readable under load. Two ready-to-run helpers:
+
+- **[10k-word-prompt.md](docs/10k-word-prompt.md)** — one long streaming request per
+  platform (vLLM, Ollama, llama.cpp), each with the right host and payload
+  shape. Exercises **decode throughput** on a single sequence; runs for minutes.
+- **[keep-llm-busy-prompt.txt](docs/keep-llm-busy-prompt.txt)** — 8-way concurrent
+  request loop against vLLM until `Ctrl-C`. Use this to drive **slots / running
+  vs waiting / KV-cache occupancy** off idle; a single request leaves the GPU
+  mostly idle between decode steps and shows none of that.
 
 ## Run
 
@@ -60,6 +74,29 @@ npm run once:ollama        # single snapshot of a specific platform
 npm run once:vllm
 npm run once:llamacpp
 ```
+
+### Starting the servers being monitored
+
+Two launchers in this repo bring a host up with the settings these metrics depend
+on, so the monitor is not left reporting a server configured to hide them:
+
+```bash
+cmd /c start-llamacpp.bat   # foreground llama-server on :8080, Ctrl-C to stop
+cmd /c start-ollama.bat     # restarts the Ollama tray app on :11434
+```
+
+- **[start-llamacpp.bat](start-llamacpp.bat)** passes `--metrics` (off by default,
+  and the monitor needs it) and `-np 1` explicitly, because `-c` is the *total* KV
+  pool divided across slots and `-np` defaults to auto — so a bare `-c 32768` can
+  silently become four 8192-token slots. It checks PATH first and says so rather
+  than failing with `not recognized`.
+- **[start-ollama.bat](start-ollama.bat)** sets the five `OLLAMA_*` variables in
+  process so the tray app inherits them, waits for `/api/version`, then prints
+  what the server *actually* loaded from `server.log` — the check that catches a
+  silently-failed restart, since `taskkill` can be denied without saying so.
+
+Both are conveniences over the documented steps, not a replacement for them; the
+reasoning for every value is in the two setup docs.
 
 Equivalent to running the script directly:
 
@@ -81,10 +118,32 @@ mode, or when there's no interactive terminal). Stop the live view with
 `Ctrl-C`.
 
 While the live view runs, the machine is kept from **idle-sleeping**, so a long
-watch isn't cut short mid-session. The display is still free to turn off, and
-closing a laptop lid still sleeps as usual. Press **`k`** in the TUI to toggle it
-on or off — the footer shows the current state. `--no-keep-awake` starts it off,
-and `--once` never engages it. Details in [keep-awake.md](keep-awake.md).
+watch isn't cut short mid-session. The display is still free to turn off. Press
+**`k`** in the TUI to toggle it on or off — the footer shows the current state.
+`--no-keep-awake` starts it off, and `--once` never engages it. Details in
+[keep-awake.md](docs/keep-awake.md).
+
+Closing the laptop lid still sleeps the machine, because that is a separate
+setting no runtime request can override. Press **`l`** (Windows only) to set the
+lid-close action to *do nothing*, and `l` again to put the previous value back.
+Two things are worth knowing before using it:
+
+- It changes a **persistent system power setting**, for both AC and battery — not
+  a per-process request scoped to this run.
+- It is **not reverted automatically on exit.** Quit with the override on and it
+  stays on until you toggle it off. The original values are saved to
+  `~/.llm-monitor-lid-action.json`, and that file's presence is how a later run
+  knows there is something to restore — so it survives a crash or `Ctrl-C`.
+
+Windows normally lets you change power policy without elevation, and only when
+that is denied does an admin prompt appear. The footer reads `awaiting admin…`
+for as long as a toggle is in flight, so on the usual unelevated path it is a
+brief flicker rather than a sign that a prompt is waiting for you. The new value
+is read back before the footer settles, so a denied or dismissed change leaves
+the state showing as unchanged instead of claiming success.
+
+The override is Windows-only. Elsewhere the key is not bound and the footer omits
+the lid-close segment rather than offering a control that does nothing.
 
 ## Options
 
@@ -98,14 +157,25 @@ and `--once` never engages it. Details in [keep-awake.md](keep-awake.md).
 | `--interval MS` | `2000` | Refresh / sampling interval |
 | `--plain` | — | Plain text instead of the TUI (also automatic when piped / `NO_COLOR`) |
 | `--once` | — | Print a single snapshot and exit |
-| `--no-keep-awake` | — | Start with keep-awake off; toggle it with `k` in the TUI ([details](keep-awake.md)) |
+| `--no-keep-awake` | — | Start with keep-awake off; toggle it with `k` in the TUI ([details](docs/keep-awake.md)) |
 
 ### Keys
 
 | Key | Action |
 |---|---|
 | `k` | Toggle keep-awake on / off (TUI only) |
+| `l` | Toggle the lid-close override on / off (TUI only, **Windows only**) |
 | `Ctrl-C` | Exit |
+
+The footer reports what is actually in effect rather than what was requested:
+
+| Reads | Meaning |
+|---|---|
+| `keep-awake on` / `off` | An inhibitor is / is not being held |
+| `keep-awake unavailable` | Requested, but the helper could not be started ([why](docs/keep-awake.md)) |
+| `lid-close user setting` | Your own lid-close action, untouched |
+| `lid-close do nothing` | Override active — **persists after exit** |
+| `lid-close awaiting admin…` | Waiting on an elevation prompt |
 
 ## Example output
 
@@ -136,7 +206,7 @@ amber / red, and `trend` sparklines show the recent history):
 │ decode trend ▄▆▆▇▇▇▆▇▇▇▇▇
 └──────────────────────────────────────────────────────────────────────┘
 
-  k keep-awake on  ·  Ctrl-C to exit
+  k keep-awake on  ·  l lid-close user setting  ·  Ctrl-C to exit
 ```
 
 Plain text (`--plain`, `--once`, or when piped):
@@ -182,7 +252,7 @@ llama.cpp (http://localhost:8080)
   throughput (live)  prefill 0.0 tok/s  decode 66.1 tok/s
 ```
 
-Note the two llama.cpp-specific readings.
+Note the three llama.cpp-specific readings.
 
 **Throughput** is labelled `(live)` or `(last completed)`, and the difference
 matters. llama.cpp commits its Prometheus timings only when a request *finishes*,
@@ -198,11 +268,20 @@ server's own figure for the last completed request.
 **Prefix reuse** is cumulative since the server started, not the last prompt,
 because `llamacpp:prompt_tokens_total` counts only the tokens actually evaluated.
 
+**KV cache** has no metric of its own, so the denominator is summed from `/slots`:
+each slot's `n_ctx`, added up. That is right at llama.cpp's default of separate
+per-slot pools (`kv_unified = 'false'` in the startup banner), which is what
+`-c` ÷ `-np` produces. It is **wrong if the server was started with
+`--kv-unified`**: the slots then share one pool, and summing overstates the
+denominator by the slot count, reporting a proportionally low percentage. `/props`
+exposes `n_ctx` and `total_slots` but not `kv_unified`, so the monitor cannot
+detect this — check the banner if the figure looks implausibly low.
+
 ## Interpreting the output
 
 Every number's source, what it actually measures, and the traps in reading it
 (per-slot vs aggregate throughput, KV cache vs prompt cache, why a prefix-cache
-hit *lowers* the prefill rate) are documented in **[metrics.md](metrics.md)**.
+hit *lowers* the prefill rate) are documented in **[metrics.md](docs/metrics.md)**.
 
 ## Adding a platform
 
@@ -235,10 +314,11 @@ when it is merely unobservable.
 Neither view uses the alternate-screen buffer, so both work in any terminal,
 including Git Bash / MinTTY. `Ctrl-C` exits.
 
-The `k` shortcut is the only feature that needs raw keyboard input. Where
-`setRawMode` is unavailable (MinTTY without a pty), it is simply not offered:
-the footer drops the `k` and shows the keep-awake state on its own, and
-everything else behaves as before. The plain view has no key handling at all.
+The `k` and `l` shortcuts are the only features that need raw keyboard input.
+Where `setRawMode` is unavailable (MinTTY without a pty), they are simply not
+offered: the footer drops the key letters and shows the states on their own, and
+everything else behaves as before. The plain view has no key handling at all, so
+`--no-keep-awake` is the only way to control keep-awake there.
 
 - The **TUI** homes the cursor and clears each line as it rewrites it, so the
   redraw does not flash. It reads `process.stdout.columns` on every frame and

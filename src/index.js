@@ -32,7 +32,12 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { renderTui } from './tui.js';
 import { startKeepAwake, stopKeepAwake, isKeepAwakeActive } from './keep-awake.js';
-import { disableLidAction, restoreLidAction, isLidActionDisabled } from './lid-action.js';
+import {
+  disableLidAction,
+  restoreLidAction,
+  isLidActionDisabled,
+  isLidActionSupported,
+} from './lid-action.js';
 
 const args = process.argv.slice(2);
 function opt(name, def) {
@@ -875,8 +880,12 @@ function setKeepAwake(on) {
 }
 
 // ---- lid-close-action override toggle --------------------------------
+// The override is a Windows power-policy edit with no equivalent elsewhere, so
+// off Windows the key is not bound and the footer omits the segment entirely
+// rather than offering a control that silently does nothing.
 const LID_ACTION_KEY = 'l';
-let lidActionOn = isLidActionDisabled();
+const LID_ACTION_SUPPORTED = isLidActionSupported();
+let lidActionOn = LID_ACTION_SUPPORTED && isLidActionDisabled();
 let lidActionPending = false;
 
 // Each toggle needs an elevated shell (a UAC prompt), so it is asynchronous
@@ -919,7 +928,7 @@ function bindKeys() {
       else if (key.toLowerCase() === KEEP_AWAKE_KEY) {
         setKeepAwake(!keepAwakeOn);
         renderFrame();
-      } else if (key.toLowerCase() === LID_ACTION_KEY) {
+      } else if (LID_ACTION_SUPPORTED && key.toLowerCase() === LID_ACTION_KEY) {
         setLidAction(!lidActionOn);
       }
     }
@@ -942,11 +951,13 @@ function renderFrame() {
         unavailable: keepAwakeOn && !isKeepAwakeActive(),
         key: keysBound ? KEEP_AWAKE_KEY : null,
       },
-      lidAction: {
-        on: lidActionOn,
-        pending: lidActionPending,
-        key: keysBound ? LID_ACTION_KEY : null,
-      },
+      lidAction: LID_ACTION_SUPPORTED
+        ? {
+            on: lidActionOn,
+            pending: lidActionPending,
+            key: keysBound ? LID_ACTION_KEY : null,
+          }
+        : null,
     })
   );
 }

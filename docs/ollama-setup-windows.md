@@ -129,7 +129,21 @@ the background server.
 taskkill /F /IM "ollama app.exe" /IM ollama.exe 2>/dev/null; sleep 3; "$LOCALAPPDATA/Programs/Ollama/ollama app.exe" &
 ```
 
-If that returns `Access is denied`, use the documented Windows path instead:
+[start-ollama.bat](start-ollama.bat) in this repo does this restart plus the
+Step 3b verification, and sets the same five variables in-process so the tray app
+inherits them even if `setx` was never run:
+
+```bash
+cmd /c start-ollama.bat
+```
+
+It waits for `/api/version` rather than trusting the `taskkill` exit code, then
+prints what the server actually loaded. Keep its values in sync with Step 2 —
+launching Ollama from the Start menu picks up the `setx` values, not the
+launcher's. Its llama.cpp counterpart is
+[start-llamacpp.bat](start-llamacpp.bat).
+
+If the restart returns `Access is denied`, use the documented Windows path instead:
 right-click the Ollama tray icon → **Quit Ollama**, then relaunch **Ollama** from
 the Start menu.
 
@@ -429,7 +443,9 @@ Kill `ollama app.exe` **first**, or the supervisor may respawn the server. On
 "$LOCALAPPDATA/Programs/Ollama/ollama app.exe" &
 ```
 
-Or launch **Ollama** from the Start menu. **Prefer the tray app over
+Or `cmd /c start-ollama.bat`, which kills any existing tray app and server first,
+so it doubles as the start path — and confirms the settings took. Or launch
+**Ollama** from the Start menu. **Prefer the tray app over
 `ollama serve`** — the tray reads the persisted `OLLAMA_*` variables and
 supervises the server, which is what the whole Step 2 configuration depends on.
 
@@ -477,7 +493,7 @@ tail -f "$LOCALAPPDATA/Ollama/server.log"
 | `ollama: command not found` in Git Bash | Shell predates install; PATH not refreshed | Open a fresh Git Bash, or `export PATH="$PATH:$LOCALAPPDATA/Programs/Ollama"` |
 | `server.log` shows `CONTEXT_LENGTH:0`, `NUM_PARALLEL:1` | Step 3 skipped — server started before `setx` | Restart Ollama (Step 3), then re-verify (Step 3b) |
 | `PROCESSOR` shows `48%/52% CPU/GPU` | `NUM_PARALLEL × CONTEXT_LENGTH` exceeds VRAM | `setx OLLAMA_NUM_PARALLEL 2`, redo Step 3 |
-| `taskkill` / `Stop-Process` → `Access is denied` | Non-interactive or agent-driven shell | Tray icon → Quit Ollama, relaunch from Start menu |
+| `taskkill` / `Stop-Process` → `Access is denied` | Non-interactive or agent-driven shell | Tray icon → Quit Ollama, relaunch from Start menu, or run `start-ollama.bat` in a normal window |
 | `/api/ps` returns `{"models":[]}` mid-session | `KEEP_ALIVE` still at the 5m default | `setx OLLAMA_KEEP_ALIVE "-1"`, redo Step 3 |
 | `ollama ps` errors with connection refused | No server running — not merely an unloaded model | Start the tray app, not `ollama serve` |
 | `ollama ps` empty but server responds | Model unloaded; normal after a reboot or `ollama stop` | Load it, or just send a request |
@@ -514,6 +530,9 @@ Confirm rather than assume, in one command:
 ```bash
 ollama ps; grep -oE 'OLLAMA_(CONTEXT_LENGTH|NUM_PARALLEL|KEEP_ALIVE|FLASH_ATTENTION|KV_CACHE_TYPE):[^ ]*' "$LOCALAPPDATA/Ollama/server.log" | tail -6
 ```
+
+If that shows the defaults, `cmd /c start-ollama.bat` restarts and re-verifies in
+one step.
 
 The model itself is **not** preloaded — `ollama ps` is empty until the first
 request, at which point the ~12.7 GiB allocation happens (~7.3 s). `KEEP_ALIVE=-1`

@@ -294,10 +294,15 @@ curl -s http://localhost:8000/v1/models | python3 -m json.tool
 Expect `"id": "local-llm"` with `"root": "Qwen/Qwen3-8B-FP8"`.
 
 ```bash
-curl -s http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"local-llm","messages":[{"role":"user","content":"Say hello in exactly five words."}],"max_tokens":50}' | python3 -m json.tool
+curl -s http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"local-llm","messages":[{"role":"user","content":"Say hello in exactly five words."}],"max_tokens":50,"chat_template_kwargs":{"enable_thinking":false}}' | python3 -m json.tool
 ```
 
 The `usage` block carries `prompt_tokens` and `completion_tokens`.
+
+`enable_thinking` is not optional in a smoke test this small. Without it Qwen3
+spends the 50-token budget inside a `<think>` block and returns
+`"content": ""` with `finish_reason: "length"` — a working server looking like a
+broken one. See [Qwen3 thinking mode](#qwen3-thinking-mode-and-the-max_tokens-trap).
 
 ## Step 11 — Reach it from Windows
 
@@ -331,6 +336,104 @@ print(resp.choices[0].message.content)
 
 `api_key` is required by the SDK and ignored by vLLM unless the server was
 started with `--api-key`.
+
+---
+
+## Stopping the server
+
+`Ctrl-C` in the terminal running `vllm serve` stops it. Uvicorn prints
+`Shutting down`, the engine core process exits, and **all VRAM is released** —
+the `nvidia-smi` figure drops back to the desktop baseline. Nothing is left
+resident; there is no daemon and no background service.
+
+Two consequences of it being an ordinary foreground process:
+
+- **Closing the terminal also kills it.** There is no detach. To keep it alive
+  across terminal closes, run it under `tmux`/`screen`, or `nohup ... &`.
+- **Closing the last WSL shell can stop the VM**, taking the server with it.
+
+If a restart fails with `address already in use`, a previous instance did not
+exit cleanly:
+
+```bash
+ss -ltnp | grep :8000
+```
+
+Nothing is lost by killing it — weights and the compile cache are on disk.
+
+## Qwen3 thinking mode and the `max_tokens` trap
+
+Qwen3 is a hybrid reasoning model. By default the chat template opens a
+`<think>` block, and **those tokens are billed against `max_tokens` like any
+other output.** A budget that looks generous for the visible answer can be
+consumed entirely before the answer starts.
+
+Observed on this setup: `max_tokens: 500` returned
+`completion_tokens: 500`, `finish_reason: "length"`, and empty visible content —
+all 500 tokens were reasoning.
+
+Three ways to handle it, in order of usefulness here:
+
+**Turn thinking off per request** — no server flag, no restart:
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"local-llm","messages":[{"role":"user","content":"Say hello in exactly five words."}],"chat_template_kwargs":{"enable_thinking":false}}' | python3 -m json.tool
+```
+
+Verified: no `<think>` tag in the response, answer arrives immediately.
+
+**Keep thinking but separate it** — restart with `--reasoning-parser qwen3`, and
+vLLM splits the block into `message.reasoning_content`, leaving
+`message.content` as the answer alone. Costs a restart; useful when you want the
+reasoning and want to log it apart from the answer.
+
+**Raise or omit `max_tokens`.** Omitting it entirely does not mean "short" — the
+server allows up to `--max-model-len` minus the prompt. A single omitted-budget
+request on this setup returned `completion_tokens: 10646` with
+`finish_reason: "stop"` (~48,000 characters, ~7,500 words). Budget accordingly:
+an 8B model will happily fill a 16k context if nothing stops it.
+
+## Streaming
+
+Add `stream: true`. Token-level usage is **opt-in** via `stream_options`:
+
+```bash
+export PYTHONIOENCODING=utf-8
+curl -sN http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"local-llm","stream":true,"stream_options":{"include_usage":true},"chat_template_kwargs":{"enable_thinking":false},"messages":[{"role":"user","content":"Explain how a CPU cache works."}]}'
+```
+
+Three flags exist to defeat buffering, and all three are needed for output to
+appear progressively rather than in one burst at the end:
+
+- `curl -N` disables curl's own output buffering.
+- `python3 -u` if piping through a Python consumer.
+- `PYTHONIOENCODING=utf-8` so the model's non-ASCII output does not raise
+  `UnicodeEncodeError` mid-stream on a narrow default encoding.
+
+The **final** SSE chunk carries the `usage` object and has an empty `choices`
+array — a consumer that reads `choices[0]` unconditionally crashes on the last
+chunk. Then `data: [DONE]`.
+
+### Why non-streaming appears to work when streaming does not
+
+Same tokens, different assembly. Non-streaming buffers the whole completion and
+returns one JSON object, so a `<think>` block and the answer arrive together and
+any client shows *something*. Streaming hands you each delta as it is produced —
+so a request that spends its budget on reasoning streams a long
+`reasoning_content`-less `<think>` body and then stops, and it looks like the
+server produced nothing. The generation was identical in both cases; only the
+framing differed.
+
+## Generating load
+
+An idle server reports zeros on `/metrics`. Two ready-made drivers in this repo:
+
+- [10k-word-prompt.md](10k-word-prompt.md) — one long streaming request,
+  exercising decode throughput on a single sequence.
+- [keep-llm-busy-prompt.txt](keep-llm-busy-prompt.txt) — 8 concurrent requests
+  in a loop until `Ctrl-C`. Needed to move `num_requests_running` /
+  `num_requests_waiting` and KV-cache occupancy off idle; one request leaves the
+  GPU mostly idle between decode steps.
 
 ---
 
@@ -459,6 +562,9 @@ pagefile inputs read flat zeros.
 | `fatal error: Python.h: No such file` | No CPython headers | `apt install python3.12-dev` (Step 4) |
 | `Could not find nvcc` at first sample | FlashInfer sampler JIT | `VLLM_USE_FLASHINFER_SAMPLER=0` (Step 7) |
 | `deep_gemm` import AssertionError | Optional MoE lib, no toolkit | Ignore — dense model |
+| `vllm: command not found` after reboot | venv not activated in this shell | `source ~/vllm-env/bin/activate` |
+| Empty `content`, `finish_reason: length` | `<think>` ate `max_tokens` | `chat_template_kwargs.enable_thinking: false` |
+| `address already in use` on port 8000 | Previous instance still running | `ss -ltnp \| grep :8000`, then kill it |
 
 The four compile/runtime failures above surface **sequentially**, each masking
 the next. Applying Steps 4 and 7 up front avoids all of them.

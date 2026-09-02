@@ -15,7 +15,11 @@ What is *not* affected:
 
 - **The display is still free to turn off.** Only system sleep is inhibited.
 - **Closing a laptop lid still sleeps as usual.** Lid close is an explicit sleep
-  action on a hardware path that no application-level request overrides.
+  action that no application-level power request overrides — it is governed by a
+  separate power *setting*. Changing that setting is what the TUI's `l` key does,
+  and it is a different mechanism from everything described here: a persistent
+  system policy edit rather than a request held for the run, and it is not
+  reverted on exit. See the lid-close section of [README.md](README.md#keys).
 
 Scope:
 

@@ -143,6 +143,10 @@ async function applyLidAction(ac, dc) {
   return now !== null && now.ac === ac && now.dc === dc;
 }
 
+export function isLidActionSupported() {
+  return process.platform === 'win32';
+}
+
 export function isLidActionDisabled() {
   return existsSync(STATE_FILE);
 }
