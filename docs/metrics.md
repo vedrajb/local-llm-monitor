@@ -10,10 +10,13 @@ For usage and flags see [README.md](README.md). For the sleep-inhibitor see
 
 | Section | Source | Platform |
 |---|---|---|
-| GPU util, memBW, VRAM, temp, power | `nvidia-smi` | both |
+| GPU util, memBW, VRAM, temp, power | `nvidia-smi` | all platforms when NVIDIA telemetry is available |
 | Model, queue, KV cache, prefix cache, throughput | OpenAI-compatible API + Prometheus `/metrics` | vLLM |
 | Model, placement, context, keep-alive, slots | `/api/ps` | Ollama |
 | Slots, KV cache, prefix reuse, prompt cache, throughput | `server.log` | Ollama |
+| Loaded model, recipe, device, context, busy/streaming state | `/api/v1/health` + `/api/v1/models` | AMD Lemonade |
+| Last-request performance, token counts, cache reuse, completed-request total | `/api/v1/stats` | AMD Lemonade |
+| CPU, RAM, GPU, VRAM, and NPU usage | `/api/v1/system-stats` | AMD Lemonade |
 
 ## Throughput
 
@@ -98,6 +101,40 @@ For usage and flags see [README.md](README.md). For the sleep-inhibitor see
   on-disk size shown by `ollama list`.
 - `until forever` means the model is pinned (`OLLAMA_KEEP_ALIVE=-1`), which
   Ollama reports as a date centuries in the future.
+
+## AMD Lemonade
+
+- **Loaded-model state** comes from `/api/v1/health`. Its `all_models_loaded`
+  entries identify the model, checkpoint, recipe, device declaration,
+  `recipe_options.ctx_size`, and whether the model is busy or streaming. The
+  monitor reports the device string as-is; `device gpu` is not a measured
+  percentage of VRAM residency.
+- **Model size and context** come from `/api/v1/models`. Lemonade reports model
+  `size` in GB, so the monitor converts it to the byte-shaped value used by the
+  shared renderer. This is catalog/model size, not a live process footprint.
+  `context_length` is paired with `max_context_window` when both are present.
+- **Request telemetry** comes from `/api/v1/stats`. `tokens_per_second` is the
+  decode speed of the last completed request; input and output token counts are
+  shown alongside it. Lemonade does not provide a prefill speed in this
+  response, so the monitor shows the input token count without inventing a
+  prefill rate. Prefix reuse is calculated as
+  `cache_tokens / (cache_tokens + prompt_tokens)`, where `prompt_tokens` is the
+  newly evaluated portion of the prompt. `request_count_total` is the cumulative
+  completed-request count. These are server-wide last-request/cumulative values,
+  not per-client attribution.
+- **The Lemonade TUI graph is per request, not per poll.** It appends one decode
+  point when `request_count_total` changes, labels the line `decode per request
+  (on completion)`, and starts collecting history when the monitor starts.
+  Lemonade's API exposes the latest request rather than a historical list.
+- **Activity state** comes from the health entry's `is_busy` and `is_streaming`
+  flags. They identify active work but do not expose a queue depth or the
+  number of waiting requests. The monitor leaves queue and KV-cache occupancy
+  unreported rather than estimating them from GPU utilization.
+- **AMD-capable host telemetry** comes from `/api/v1/system-stats`: CPU and GPU
+  utilization are percentages, while `memory_gb` and `vram_gb` are currently
+  used memory values. `npu_percent` is shown when the installed driver and
+  Lemonade backend can report it. `nvidia-smi` remains a separate source and is
+  still displayed when an NVIDIA adapter is available.
 
 ## Unavailable values
 

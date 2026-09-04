@@ -1,9 +1,9 @@
 # Local LLM Monitor
 
 A zero-dependency Node script (Node 18+) that monitors a local LLM hosting
-platform alongside the **NVIDIA** GPU it runs on, and prints a plain-text
-snapshot on an interval. No `npm install` — it uses only Node built-ins plus
-`nvidia-smi`.
+platform alongside available GPU telemetry, and prints a plain-text snapshot on
+an interval. No `npm install` — it uses only Node built-ins plus `nvidia-smi`
+or the host telemetry exposed by AMD Lemonade.
 
 The hosting platform is chosen at startup through a pluggable provider
 (factory pattern). **Currently supported platforms:**
@@ -11,6 +11,7 @@ The hosting platform is chosen at startup through a pluggable provider
 - **vLLM**
 - **Ollama**
 - **llama.cpp**
+- **AMD Lemonade**
 
 It reads:
 
@@ -36,6 +37,12 @@ It reads:
   reports, and the panel says which flag is missing. VRAM residency is not
   exposed over HTTP, so there is no **placement** figure — read the `nvidia-smi`
   VRAM gauge instead.
+- **AMD Lemonade** (via `/api/v1/health`, `/api/v1/models`, `/api/v1/stats`,
+  `/api/v1/system-stats`) — loaded model, recipe/device/context, busy and
+  streaming state, prefix-cache reuse from the last request, last-request
+  token counts and decode speed, plus CPU/RAM/GPU/VRAM/NPU host telemetry.
+  Lemonade's stats endpoint reports the last completed request; it does not
+  expose a queue or live KV-cache occupancy through this provider.
 
 ## Documentation
 
@@ -47,6 +54,9 @@ It reads:
 - **[vllm-setup-windows-wsl2.md](docs/vllm-setup-windows-wsl2.md)** — vLLM host setup,
   including how to restart the server after a reboot.
 - **[llamacpp-setup-windows.md](docs/llamacpp-setup-windows.md)** — llama.cpp host setup.
+- **[amd-lemonade-setup-windows.md](docs/amd-lemonade-setup-windows.md)** — AMD Lemonade host setup for
+  `Qwen3-8B-GGUF-Q8_0` on
+  Windows.
 
 ### Generating load
 
@@ -54,7 +64,7 @@ An idle server reports zeros, so the queue, KV-cache and throughput panels only
 become readable under load. Two ready-to-run helpers:
 
 - **[10k-word-prompt.md](docs/10k-word-prompt.md)** — one long streaming request per
-  platform (vLLM, Ollama, llama.cpp), each with the right host and payload
+  platform (vLLM, Ollama, llama.cpp, AMD Lemonade), each with the right host and payload
   shape. Exercises **decode throughput** on a single sequence; runs for minutes.
 - **[keep-llm-busy-prompt.txt](docs/keep-llm-busy-prompt.txt)** — 8-way concurrent
   request loop against vLLM until `Ctrl-C`. Use this to drive **slots / running
@@ -68,11 +78,14 @@ npm start                  # live TUI, refreshes every 2s
 npm run ollama             # live TUI, skip the platform prompt
 npm run vllm               # live TUI, skip the platform prompt
 npm run llamacpp           # live TUI, skip the platform prompt
+npm run lemonade           # live TUI, skip the platform prompt
 npm run plain              # live plain text instead of the TUI
 npm run once               # two samples ~1.5s apart, prints, exits
 npm run once:ollama        # single snapshot of a specific platform
 npm run once:vllm
 npm run once:llamacpp
+npm run once:lemonade
+npm test                   # run the Node test suite
 ```
 
 ### Starting the servers being monitored
@@ -96,7 +109,7 @@ cmd /c start-ollama.bat     # restarts the Ollama tray app on :11434
   silently-failed restart, since `taskkill` can be denied without saying so.
 
 Both are conveniences over the documented steps, not a replacement for them; the
-reasoning for every value is in the two setup docs.
+reasoning for every value is in the setup docs.
 
 Equivalent to running the script directly:
 
@@ -105,6 +118,7 @@ node src/index.js                    # live TUI
 node src/index.js --plain            # live plain text
 node src/index.js --once             # takes two samples ~1.5s apart, prints, exits
 node src/index.js --platform ollama  # skip the platform prompt
+node src/index.js --platform lemonade # monitor Lemonade on :13305
 ```
 
 The live view is a **TUI** (boxes, gauges, sparklines). It automatically falls
@@ -149,11 +163,13 @@ the lid-close segment rather than offering a control that does nothing.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--platform KEY` | prompt / first | Platform to monitor: `vllm`, `ollama` or `llamacpp` (also `LLM_PLATFORM` env) |
+| `--platform KEY` | prompt / first | Platform to monitor: `vllm`, `ollama`, `llamacpp` or `lemonade` (also `LLM_PLATFORM` env) |
 | `--vllm-host URL` | `http://localhost:8000` | vLLM base URL (also `VLLM_HOST` env) |
 | `--ollama-host URL` | `http://localhost:11434` | Ollama base URL (also `OLLAMA_HOST` env; a missing `http://` is added) |
 | `--ollama-log PATH` | platform default | Ollama `server.log` to read throughput from (also `OLLAMA_LOG` env) |
 | `--llamacpp-host URL` | `http://localhost:8080` | llama.cpp base URL (also `LLAMACPP_HOST` env; a missing `http://` is added) |
+| `--lemonade-host URL` | `http://localhost:13305` | AMD Lemonade server base URL (also `LEMONADE_HOST` env; a missing `http://` is added) |
+| `--lemonade-api-key KEY` | — | Optional Lemonade bearer token (also `LEMONADE_API_KEY` env) |
 | `--interval MS` | `2000` | Refresh / sampling interval |
 | `--plain` | — | Plain text instead of the TUI (also automatic when piped / `NO_COLOR`) |
 | `--once` | — | Print a single snapshot and exit |
@@ -254,6 +270,24 @@ llama.cpp (http://localhost:8080)
 
 Note the three llama.cpp-specific readings.
 
+```
+=== Local LLM Monitor (AMD Lemonade) === 4:22:10 pm
+
+GPU (nvidia-smi)
+  nvidia-smi not available
+
+Lemonade system-stats
+  CPU 23%  RAM 6.5 GB used  GPU 68%  VRAM 4.2 GB used  NPU 11%
+
+AMD Lemonade (http://localhost:13305)
+  model Qwen3-8B-GGUF-Q8_0  8.7 GB loaded
+  device gpu  context 32768/40960 trained
+  request state  busy yes  streaming yes
+  requests completed  12
+  prefix reuse 43% (96/224 tok)
+  last request  input 128 tok  decode 42.5 tok/s (32 tok)
+```
+
 **Throughput** is labelled `(live)` or `(last completed)`, and the difference
 matters. llama.cpp commits its Prometheus timings only when a request *finishes*,
 and the gauge is emptied by whichever client reads `/metrics` first — so through a
@@ -264,6 +298,11 @@ figure, and it is immune to both problems. `prefill` has no live equivalent
 because it lands in one batch, so it reads `0.0` during decode — correctly, since
 nothing is being prefilled. When nothing is in flight the box falls back to the
 server's own figure for the last completed request.
+
+For AMD Lemonade, the TUI's `decode per request` graph records one point only
+when `request_count_total` changes, and is labelled `(on completion)`. It is a
+local history collected from the time the monitor starts; Lemonade exposes the
+latest request through `/api/v1/stats`, not a historical list of all requests.
 
 **Prefix reuse** is cumulative since the server started, not the last prompt,
 because `llamacpp:prompt_tokens_total` counts only the tokens actually evaluated.
@@ -296,10 +335,13 @@ a provider reports only what its server can actually answer:
 - Always: `ok`, `error`, `models`.
 - Aggregate-counter style (vLLM): `running`, `waiting`, `kvUsage`,
   `cacheHitRate`, `promptRate`, `decodeRate`.
-- Per-model style (Ollama, llama.cpp): `loaded[]` with `id`, `size`, `params`,
-  `quant`, `context`, and optionally `vram`, `placement`, `until`,
-  `contextTrain`; plus `slots`, `kv`, `cacheHit` (add `scope` when it is not the
-  last prompt), `peakTokens`, `promptCache`.
+- Per-model style (Ollama, llama.cpp, AMD Lemonade): `loaded[]` with `id`,
+  `size`, `params`, `quant`, `context`, and optionally `vram`, `placement`,
+  `device`, `until`, `contextTrain`, `busy`, and `streaming`; plus platform
+  specific `slots`, `kv`, `cacheHit` (add `scope` when it is not the last
+  prompt), `peakTokens`, `promptCache`, and `requestCountTotal`.
+- AMD Lemonade host telemetry: `systemStats` with CPU/RAM/GPU/VRAM/NPU values
+  from its `/api/v1/system-stats` endpoint.
 - Throughput, first match wins: `lastRequest` (per request, from a log),
   `metricsDisabled`, `promptRate`/`decodeRate` (plus `rateLive` when the rate is
   sampled live rather than read off a completed request),

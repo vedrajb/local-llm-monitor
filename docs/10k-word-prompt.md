@@ -64,3 +64,21 @@ for line in sys.stdin:
     if u: print("-- total %d tok  reason %s" % (u.get("total_tokens",0), fin))
 '
 ```
+
+## amd lemonade
+
+__URL__: http://localhost:13305
+
+```bash
+export PYTHONIOENCODING=utf-8 && curl -s -N http://localhost:13305/api/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"Qwen3-8B-GGUF-Q8_0","messages":[{"role":"user","content":"explain stormlight archive in 10000 words."}],"temperature":0.7,"stream":true,"max_tokens":4096,"chat_template_kwargs":{"enable_thinking":false}}' | python -u -c '
+import sys, json
+for line in sys.stdin:
+    if not line.startswith("data: "): continue
+    body = line[6:].strip()
+    if body == "[DONE]": print(); break
+    d = json.loads(body)
+    for ch in d.get("choices", []):
+        t = ch.get("delta", {}).get("content")
+        if t: print(t, end="", flush=True)
+'
+```

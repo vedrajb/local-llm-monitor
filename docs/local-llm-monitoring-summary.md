@@ -32,7 +32,7 @@ Recommended inputs:
 - Page faults and swap/pagefile activity
 - PCIe transfer rate
 
-Ollama exposes model size and VRAM-resident size through `GET /api/ps`, while `ollama ps` reports full GPU, full CPU, or mixed CPU/GPU placement. llama.cpp supports explicit CPU/GPU hybrid inference.
+Ollama exposes model size and VRAM-resident size through `GET /api/ps`, while `ollama ps` reports full GPU, full CPU, or mixed CPU/GPU placement. llama.cpp supports explicit CPU/GPU hybrid inference. AMD Lemonade exposes loaded-model/device state through `/v1/health`, request statistics through `/v1/stats`, and host CPU/GPU/VRAM/NPU telemetry through `/v1/system-stats`; its current API does not expose queue depth or KV-cache occupancy.
 
 ## 2. GPU Utilization vs. Data Starvation
 
@@ -72,7 +72,7 @@ decode_tokens_per_sec =
 
 Ollama returns these counts and durations from its generation API. llama.cpp provides response timings and an optional Prometheus metrics endpoint. vLLM exposes server metrics and optional per-request timing data.
 
-Runtime-native token counters are preferable to repeatedly tokenizing partial streamed text.
+Runtime-native token counters are preferable to repeatedly tokenizing partial streamed text. Lemonade's `/v1/stats` is a server-wide last-request view, so it is useful for a passive dashboard but does not attribute a response to a particular client.
 
 ## 4. ETA
 
@@ -107,6 +107,7 @@ Open-ended chat generation has no known stopping point. In that situation, displ
    - Ollama
    - llama.cpp
    - vLLM
+   - AMD Lemonade
    - Future local inference backends
 
 2. **Hardware and OS collectors**
@@ -132,6 +133,7 @@ For a Windows-first implementation, begin with **Ollama and NVIDIA NVML**. This 
 - [Ollama usage metrics](https://docs.ollama.com/api/usage)
 - [llama.cpp server metrics](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
 - [vLLM production metrics](https://docs.vllm.ai/en/latest/usage/metrics/)
+- [Lemonade Server API](https://lemonade-server.ai/docs/api/lemonade/)
 - [NVIDIA DCGM profiling metrics](https://docs.nvidia.com/datacenter/dcgm/latest/user-guide/feature-overview.html)
 - [NVIDIA NVML](https://docs.nvidia.com/deploy/nvml-api/index.html)
 - [AMD SMI monitoring](https://rocm.docs.amd.com/projects/amdsmi/en/latest/how-to/amdsmi-cli-tool.html)

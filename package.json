@@ -1,7 +1,7 @@
 {
   "name": "local-llm-monitor",
   "version": "1.0.0",
-  "description": "Zero-dependency terminal UI for monitoring a local vLLM, Ollama or llama.cpp server (+ NVIDIA GPU): GPU utilization, VRAM, model placement, request queue, KV/prefix cache, and token throughput.",
+  "description": "Zero-dependency terminal UI for monitoring local vLLM, Ollama, llama.cpp or AMD Lemonade servers (+ NVIDIA/AMD telemetry): GPU utilization, VRAM, model placement, request state, KV/prefix cache, and token throughput.",
   "type": "module",
   "bin": {
     "llm-monitor": "src/index.js"
@@ -11,11 +11,14 @@
     "ollama": "node src/index.js --platform ollama",
     "vllm": "node src/index.js --platform vllm",
     "llamacpp": "node src/index.js --platform llamacpp",
+    "lemonade": "node src/index.js --platform lemonade",
     "plain": "node src/index.js --plain",
+    "test": "node --test",
     "once": "node src/index.js --once",
     "once:ollama": "node src/index.js --platform ollama --once",
     "once:vllm": "node src/index.js --platform vllm --once",
-    "once:llamacpp": "node src/index.js --platform llamacpp --once"
+    "once:llamacpp": "node src/index.js --platform llamacpp --once",
+    "once:lemonade": "node src/index.js --platform lemonade --once"
   },
   "engines": {
     "node": ">=18"

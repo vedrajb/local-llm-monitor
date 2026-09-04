@@ -124,6 +124,7 @@ function footerLines(ka, lid) {
 
 export function renderTui(provider, gpus, v, history, opts = {}) {
   const { gb, pct, rate, interval } = opts;
+  const systemGb = (n) => (n == null || Number.isNaN(n) ? '—' : `${n.toFixed(1)} GB`);
   const L = [];
   const dot = v.ok ? `${OK}●${RESET}` : `${BAD}●${RESET}`;
 
@@ -161,6 +162,18 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
       L.push(...box(`GPU${g.index}  ${g.name}`, lines, ACC));
     }
   }
+  if (v.systemStats) {
+    const s = v.systemStats;
+    const systemBars = 22;
+    const systemLines = [
+      `${col('GPU util', 10)}${gauge(s.gpuPercent / 100, systemBars, sevColor(s.gpuPercent))} ${BOLD}${col(pct(s.gpuPercent), 5)}${RESET}`,
+      `${col('VRAM used', 10)}${BOLD}${systemGb(s.vramGb)}${RESET}`,
+      `${col('CPU', 10)}${gauge(s.cpuPercent / 100, systemBars, sevColor(s.cpuPercent))} ${BOLD}${col(pct(s.cpuPercent), 5)}${RESET}`,
+      `${col('RAM used', 10)}${BOLD}${systemGb(s.memoryGb)}${RESET}`,
+      `${col('NPU', 10)}${gauge(s.npuPercent / 100, systemBars, sevColor(s.npuPercent))} ${BOLD}${col(pct(s.npuPercent), 5)}${RESET}`,
+    ];
+    L.push(...box('Lemonade system-stats', systemLines, ACC));
+  }
 
   // ---- server ----
   if (!v.ok) {
@@ -183,7 +196,9 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
       // llama.cpp does not report VRAM residency over HTTP, so its placement is
       // omitted rather than rendered as unknown.
       const detail = [
-        m.placement != null || m.vram != null
+        m.device != null
+          ? `${MUTE}device${RESET} ${m.device}`
+          : m.placement != null || m.vram != null
           ? `${MUTE}placement${RESET} ${gpuResident ? OK : WARN}${m.placement ?? '—'}${RESET}`
           : null,
         m.context != null
@@ -212,6 +227,15 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
   const bars = 16;
   if (v.loaded) {
     const rt = [];
+    if (v.busy != null || v.streaming != null) {
+      rt.push(
+        `${col('state', 10)}${MUTE}busy${RESET} ${BOLD}${v.busy == null ? '—' : v.busy ? 'yes' : 'no'}${RESET}   ` +
+          `${MUTE}streaming${RESET} ${BOLD}${v.streaming == null ? '—' : v.streaming ? 'yes' : 'no'}${RESET}`
+      );
+    }
+    if (v.requestCountTotal != null) {
+      rt.push(`${col('completed', 10)}${BOLD}${v.requestCountTotal}${RESET} ${MUTE}requests${RESET}`);
+    }
     // Only llama.cpp reports these; Ollama's queue depth is not observable.
     if (v.running != null || v.waiting != null) {
       rt.push(
@@ -246,13 +270,29 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
     const tp = [];
     if (v.lastRequest) {
       const r = v.lastRequest;
-      tp.push(
-        `${MUTE}prefill${RESET} ${BOLD}${rate(r.prefillRate)}${RESET}` +
-          (r.promptTokens != null ? ` ${MUTE}(${r.promptTokens} tok)${RESET}` : '') +
-          `    ${MUTE}decode${RESET} ${BOLD}${rate(r.decodeRate)}${RESET}` +
-          (r.genTokens != null ? ` ${MUTE}(${r.genTokens} tok)${RESET}` : '')
-      );
-      if (history.decodeRate && history.decodeRate.length > 1) {
+      const request = [];
+      if (r.prefillRate != null) {
+        request.push(
+          `${MUTE}prefill${RESET} ${BOLD}${rate(r.prefillRate)}${RESET}` +
+            (r.promptTokens != null ? ` ${MUTE}(${r.promptTokens} tok)${RESET}` : '')
+        );
+      } else if (r.promptTokens != null) {
+        request.push(`${MUTE}input${RESET} ${BOLD}${r.promptTokens} tok${RESET}`);
+      }
+      if (r.decodeRate != null) {
+        request.push(
+          `${MUTE}decode${RESET} ${BOLD}${rate(r.decodeRate)}${RESET}` +
+            (r.genTokens != null ? ` ${MUTE}(${r.genTokens} tok)${RESET}` : '')
+        );
+      } else if (r.genTokens != null) {
+        request.push(`${MUTE}output${RESET} ${BOLD}${r.genTokens} tok${RESET}`);
+      }
+      tp.push(`${MUTE}last request${RESET}  ${request.join('    ') || `${MUTE}no telemetry${RESET}`}`);
+      if (history.requestDecodeRate && history.requestDecodeRate.length > 0) {
+        tp.push(
+          `${MUTE}decode per request${RESET} ${ACC}${spark(history.requestDecodeRate)}${RESET} ${MUTE}(on completion)${RESET}`
+        );
+      } else if (history.decodeRate && history.decodeRate.length > 1) {
         tp.push(`${MUTE}decode trend${RESET} ${ACC}${spark(history.decodeRate)}${RESET}`);
       }
     } else if (v.metricsDisabled) {
@@ -272,7 +312,7 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
     } else if (v.logMissing) {
       tp.push(`${WARN}throughput unavailable${RESET} ${MUTE}(no server.log at ${v.logMissing})${RESET}`);
     } else {
-      tp.push(`${MUTE}no completed request in recent log${RESET}`);
+      tp.push(`${MUTE}no completed request telemetry${RESET}`);
     }
     // Only llama.cpp mid-generation produces a live rate; every other source
     // here — its committed gauge, Ollama's log figure — describes the request

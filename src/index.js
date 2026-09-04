@@ -21,7 +21,8 @@
 // started with --metrics, so everything is read over HTTP with no log tailing.
 //
 // Usage:  node src/index.js [--platform KEY] [--vllm-host URL] [--ollama-host URL]
-//                           [--llamacpp-host URL] [--ollama-log PATH]
+//                           [--llamacpp-host URL] [--lemonade-host URL]
+//                           [--lemonade-api-key KEY] [--ollama-log PATH]
 //                           [--interval MS] [--once] [--no-keep-awake]
 
 import { spawn } from 'node:child_process';
@@ -55,6 +56,13 @@ const OLLAMA_HOST = opt('--ollama-host', process.env.OLLAMA_HOST || 'http://loca
 const LLAMACPP_HOST = opt('--llamacpp-host', process.env.LLAMACPP_HOST || 'http://localhost:8080')
   .replace(/^(?!https?:\/\/)/i, 'http://')
   .replace(/\/$/, '');
+const LEMONADE_HOST = opt('--lemonade-host', process.env.LEMONADE_HOST || 'http://localhost:13305')
+  .replace(/^(?!https?:\/\/)/i, 'http://')
+  .replace(/\/$/, '');
+const LEMONADE_API_KEY = opt('--lemonade-api-key', process.env.LEMONADE_API_KEY || null);
+const LEMONADE_HEADERS = LEMONADE_API_KEY
+  ? { Authorization: `Bearer ${LEMONADE_API_KEY}` }
+  : undefined;
 const OLLAMA_LOG = opt('--ollama-log', process.env.OLLAMA_LOG || null);
 const INTERVAL = parseInt(opt('--interval', '2000'), 10);
 const ONCE = args.includes('--once');
@@ -125,11 +133,11 @@ function nvidiaSmi() {
 }
 
 // ---- shared HTTP helper ----------------------------------------------
-async function fetchText(url, timeoutMs = 3000) {
+async function fetchText(url, timeoutMs = 3000, headers) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { signal: ctrl.signal });
+    const res = await fetch(url, { signal: ctrl.signal, headers });
     clearTimeout(t);
     if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
     return { ok: true, text: await res.text() };
@@ -671,6 +679,132 @@ class LlamaCppProvider {
   }
 }
 
+class LemonadeProvider {
+  constructor(host) {
+    this.host = host;
+    this.label = 'AMD Lemonade';
+    this.api = `${host}/api/v1`;
+  }
+
+  num(value) {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  }
+
+  modelInfo(entry, catalogModel) {
+    const checkpoint = entry.checkpoint || catalogModel?.checkpoint || null;
+    const quantMatch = typeof checkpoint === 'string' ? checkpoint.match(/:([^:]+)$/) : null;
+    const recipeOptions = entry.recipe_options || catalogModel?.recipe_options || {};
+    const sizeGb = this.num(entry.size) ?? this.num(catalogModel?.size);
+    const context = this.num(recipeOptions.ctx_size) ?? this.num(catalogModel?.context_length);
+    return {
+      id: entry.model_name || entry.id || '(unnamed)',
+      size: sizeGb == null ? null : sizeGb * 1024 ** 3,
+      params: entry.parameter_size || catalogModel?.parameter_size || null,
+      quant: quantMatch ? quantMatch[1] : null,
+      device: entry.device || null,
+      recipe: entry.recipe || catalogModel?.recipe || null,
+      context,
+      contextTrain: this.num(catalogModel?.max_context_window),
+      busy: typeof entry.is_busy === 'boolean' ? entry.is_busy : null,
+      streaming: typeof entry.is_streaming === 'boolean' ? entry.is_streaming : null,
+    };
+  }
+
+  async poll() {
+    const [healthRes, modelsRes, statsRes, systemStatsRes] = await Promise.all([
+      fetchText(`${this.api}/health`, 3000, LEMONADE_HEADERS),
+      fetchText(`${this.api}/models`, 3000, LEMONADE_HEADERS),
+      fetchText(`${this.api}/stats`, 3000, LEMONADE_HEADERS),
+      fetchText(`${this.api}/system-stats`, 3000, LEMONADE_HEADERS),
+    ]);
+
+    const result = {
+      ok: [healthRes, modelsRes, statsRes, systemStatsRes].some((r) => r.ok),
+      error: healthRes.error || modelsRes.error || statsRes.error || systemStatsRes.error,
+      models: [],
+    };
+
+    let health = null;
+    if (healthRes.ok) {
+      try {
+        health = JSON.parse(healthRes.text);
+      } catch {}
+    }
+
+    let catalog = [];
+    if (modelsRes.ok) {
+      try {
+        const data = JSON.parse(modelsRes.text);
+        catalog = Array.isArray(data.data)
+          ? data.data.filter((m) => m && typeof m === 'object')
+          : [];
+      } catch {}
+    }
+    const catalogById = new Map(catalog.map((m) => [m.id, m]));
+    result.models = catalog.map((m) => ({ id: m.id, root: m.checkpoint }));
+
+    if (healthRes.ok) {
+      const entries = Array.isArray(health?.all_models_loaded)
+        ? health.all_models_loaded.filter((m) => m && typeof m === 'object')
+        : health?.model_loaded
+          ? [{ model_name: health.model_loaded }]
+          : [];
+      result.loaded = entries.map((m) => this.modelInfo(m, catalogById.get(m.model_name)));
+      result.models = result.loaded.map((m) => ({ id: m.id }));
+      result.busy = result.loaded.some((m) => m.busy === true);
+      result.streaming = result.loaded.some((m) => m.streaming === true);
+    }
+
+    if (statsRes.ok) {
+      try {
+        const stats = JSON.parse(statsRes.text);
+        const requestCountTotal = this.num(stats.request_count_total);
+        const promptTokens = this.num(stats.prompt_tokens) ?? this.num(stats.input_tokens);
+        const genTokens = this.num(stats.output_tokens);
+        const decodeRate = this.num(stats.tokens_per_second);
+        if (requestCountTotal != null) result.requestCountTotal = requestCountTotal;
+        const hasRequest =
+          (requestCountTotal != null && requestCountTotal > 0) ||
+          [promptTokens, genTokens, decodeRate].some((n) => n != null && n > 0);
+        if (hasRequest) {
+          result.lastRequest = {
+            prefillRate: null,
+            decodeRate,
+            promptTokens,
+            genTokens,
+          };
+        }
+        const cachedTokens = this.num(stats.cache_tokens);
+        if (cachedTokens != null && promptTokens != null && promptTokens >= 0) {
+          const totalPromptTokens = cachedTokens + promptTokens;
+          if (totalPromptTokens > 0) {
+            result.cacheHit = {
+              cached: cachedTokens,
+              prompt: totalPromptTokens,
+              pct: (cachedTokens / totalPromptTokens) * 100,
+            };
+          }
+        }
+      } catch {}
+    }
+
+    if (systemStatsRes.ok) {
+      try {
+        const stats = JSON.parse(systemStatsRes.text);
+        result.systemStats = {
+          cpuPercent: this.num(stats.cpu_percent),
+          memoryGb: this.num(stats.memory_gb),
+          gpuPercent: this.num(stats.gpu_percent),
+          vramGb: this.num(stats.vram_gb),
+          npuPercent: this.num(stats.npu_percent),
+        };
+      } catch {}
+    }
+
+    return result;
+  }
+}
+
 // ---- platform factory -------------------------------------------------
 // Registry of supported platforms. Add new entries here as providers are
 // implemented; the startup selector and factory are driven by this list.
@@ -678,6 +812,7 @@ const PLATFORMS = [
   { key: 'vllm', label: 'vLLM', host: VLLM_HOST, create: (host) => new VllmProvider(host) },
   { key: 'ollama', label: 'Ollama', host: OLLAMA_HOST, create: (host) => new OllamaProvider(host) },
   { key: 'llamacpp', label: 'llama.cpp', host: LLAMACPP_HOST, create: (host) => new LlamaCppProvider(host) },
+  { key: 'lemonade', label: 'AMD Lemonade', host: LEMONADE_HOST, create: (host) => new LemonadeProvider(host) },
 ];
 
 function createProvider(key) {
@@ -746,6 +881,18 @@ async function snapshot(provider, sampled) {
     }
   }
 
+  if (v.systemStats) {
+    const s = v.systemStats;
+    const memory = s.memoryGb == null ? '—' : `${s.memoryGb.toFixed(1)} GB`;
+    const vram = s.vramGb == null ? '—' : `${s.vramGb.toFixed(1)} GB`;
+    L.push('');
+    L.push('Lemonade system-stats');
+    L.push(
+      `  CPU ${pct(s.cpuPercent)}  RAM ${memory} used` +
+        `  GPU ${pct(s.gpuPercent)}  VRAM ${vram} used  NPU ${pct(s.npuPercent)}`
+    );
+  }
+
   L.push('');
   L.push(`${provider.label} (${provider.host})`);
   if (!v.ok) {
@@ -766,7 +913,11 @@ async function snapshot(provider, sampled) {
         // llama.cpp cannot report VRAM residency over HTTP, so the placement
         // field is absent there rather than shown as unknown.
         const detail = [
-          mdl.placement != null || mdl.vram != null ? `placement ${mdl.placement ?? '—'}` : null,
+          mdl.device != null
+            ? `device ${mdl.device}`
+            : mdl.placement != null || mdl.vram != null
+              ? `placement ${mdl.placement ?? '—'}`
+              : null,
           mdl.context != null
             ? `context ${mdl.context}` + (mdl.contextTrain ? `/${mdl.contextTrain} trained` : '')
             : null,
@@ -780,6 +931,15 @@ async function snapshot(provider, sampled) {
       }
     }
     if (v.loaded) {
+      if (v.busy != null || v.streaming != null) {
+        L.push(
+          `  request state  busy ${v.busy == null ? '—' : v.busy ? 'yes' : 'no'}` +
+            `  streaming ${v.streaming == null ? '—' : v.streaming ? 'yes' : 'no'}`
+        );
+      }
+      if (v.requestCountTotal != null) {
+        L.push(`  requests completed  ${v.requestCountTotal}`);
+      }
       if (v.running != null || v.waiting != null) {
         L.push(`  requests  ${v.running ?? '—'} processing  ${v.waiting ?? '—'} deferred`);
       }
@@ -803,12 +963,18 @@ async function snapshot(provider, sampled) {
       }
       if (v.lastRequest) {
         const r = v.lastRequest;
-        L.push(
-          `  last request  prefill ${rate(r.prefillRate)}` +
-            (r.promptTokens != null ? ` (${r.promptTokens} tok)` : '') +
-            `  decode ${rate(r.decodeRate)}` +
-            (r.genTokens != null ? ` (${r.genTokens} tok)` : '')
-        );
+        const request = [];
+        if (r.prefillRate != null) {
+          request.push(`prefill ${rate(r.prefillRate)}` + (r.promptTokens != null ? ` (${r.promptTokens} tok)` : ''));
+        } else if (r.promptTokens != null) {
+          request.push(`input ${r.promptTokens} tok`);
+        }
+        if (r.decodeRate != null) {
+          request.push(`decode ${rate(r.decodeRate)}` + (r.genTokens != null ? ` (${r.genTokens} tok)` : ''));
+        } else if (r.genTokens != null) {
+          request.push(`output ${r.genTokens} tok`);
+        }
+        L.push(`  last request  ${request.join('  ') || 'no telemetry'}`);
       } else if (v.metricsDisabled) {
         L.push('  throughput unavailable (server started without --metrics)');
       } else if (v.promptRate != null || v.decodeRate != null) {
@@ -823,7 +989,7 @@ async function snapshot(provider, sampled) {
       } else if (v.logMissing) {
         L.push(`  throughput unavailable (no server.log at ${v.logMissing})`);
       } else {
-        L.push('  last request  no completed request in recent log');
+        L.push('  last request  no completed request telemetry');
       }
     } else {
       L.push(
@@ -846,7 +1012,7 @@ const USE_TUI =
 
 // Bounded so a long-running session cannot grow without limit.
 const HISTORY_MAX = 60;
-const history = { gpuUtil: [], memBW: [], decodeRate: [] };
+const history = { gpuUtil: [], memBW: [], decodeRate: [], requestDecodeRate: [] };
 function track(key, value) {
   if (value == null || Number.isNaN(value)) return;
   const arr = history[key];
@@ -937,6 +1103,7 @@ function bindKeys() {
 }
 
 let lastSample = null;
+let lastRequestCount = null;
 function renderFrame() {
   if (!lastSample) return;
   const [gpus, v] = lastSample;
@@ -970,9 +1137,16 @@ async function loop(provider) {
       track('gpuUtil', gpus[0].gpuUtil);
       track('memBW', gpus[0].memUtil);
     }
-    // Ollama's rate comes from the last logged request, llama.cpp's and vLLM's
-    // from counters, so fall through rather than keying on the result shape.
-    track('decodeRate', v.loaded ? (v.lastRequest?.decodeRate ?? v.decodeRate) : v.decodeRate);
+    if (v.requestCountTotal != null) {
+      if (v.lastRequest?.decodeRate != null && v.requestCountTotal !== lastRequestCount) {
+        track('requestDecodeRate', v.lastRequest.decodeRate);
+      }
+      lastRequestCount = v.requestCountTotal;
+    } else {
+      // Ollama's rate comes from the last logged request, llama.cpp's and vLLM's
+      // from counters, so fall through rather than keying on the result shape.
+      track('decodeRate', v.loaded ? (v.lastRequest?.decodeRate ?? v.decodeRate) : v.decodeRate);
+    }
     lastSample = sampled;
     renderFrame();
   } else {
