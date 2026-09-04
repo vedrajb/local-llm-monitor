@@ -17,6 +17,9 @@ For usage and flags see [README.md](README.md). For the sleep-inhibitor see
 | Loaded model, recipe, device, context, busy/streaming state | `/api/v1/health` + `/api/v1/models` | AMD Lemonade |
 | Last-request performance, token counts, cache reuse, completed-request total | `/api/v1/stats` | AMD Lemonade |
 | CPU, RAM, GPU, VRAM, and NPU usage | `/api/v1/system-stats` | AMD Lemonade |
+| Loaded model instances, model metadata, and load configuration | `/api/v1/models` | LM Studio |
+| Last completed-request token counts and decode speed | `lms log stream --json --stats --source model --filter output` | LM Studio |
+| Ongoing request state | `lms log stream --json --source server` | LM Studio |
 
 ## Throughput
 
@@ -135,6 +138,39 @@ For usage and flags see [README.md](README.md). For the sleep-inhibitor see
   used memory values. `npu_percent` is shown when the installed driver and
   Lemonade backend can report it. `nvidia-smi` remains a separate source and is
   still displayed when an NVIDIA adapter is available.
+
+## LM Studio
+
+- **Loaded-model state** comes from LM Studio's native [`GET /api/v1/models`
+  endpoint](https://lmstudio.ai/docs/developer/rest/list). The response lists
+  available models and their `loaded_instances`. Each loaded instance provides
+  its configured `context_length`; the model entry provides `max_context_length`,
+  `size_bytes`, `params_string`, quantization, and file format. Embedding models
+  are filtered out because this monitor is for text-generation servers.
+- **Model size** is the API's `size_bytes` value. The provider reports it as
+  model metadata and does not treat it as live VRAM residency; GPU utilization
+  and VRAM usage continue to come from `nvidia-smi` when available.
+- **Completed-request telemetry comes from the model log stream.** The provider
+  starts `lms log stream --json --stats --source model --filter output` and parses
+  `llm.prediction.output` events. LM Studio reports input tokens, generated
+  tokens, tokens/sec, TTFT, and total time in the event's `stats` object. This
+  is a passive observation path: the monitor does not send an inference request.
+  The stream starts at monitor launch, so requests completed before that point
+  are not replayed. LM Studio's [`/api/v1/chat` response](https://lmstudio.ai/docs/developer/rest/chat)
+  still reports the same request statistics directly to the calling client.
+- **Ongoing request state is server-log-inferred.** A second stream,
+  `lms log stream --json --source server`, watches `Received request: POST` for
+  chat/completion endpoints and `Generated prediction/response` for completion.
+  The TUI displays `busy yes (server log inferred)` while a matching request is
+  in progress. There is no native busy field in the models response, the stream
+  begins at monitor launch, and concurrent requests cannot be perfectly
+  correlated when the log has no stable request ID.
+- If the `lms` CLI is missing or either log stream exits, the monitor retains the
+  last captured request where possible and marks the unavailable telemetry rather
+  than estimating it.
+- **Authentication** is optional. If LM Studio API authentication is enabled,
+  pass `--lmstudio-api-key KEY` or set `LMSTUDIO_API_KEY` (the alternate
+  `LM_STUDIO_API_KEY` name is also accepted).
 
 ## Unavailable values
 

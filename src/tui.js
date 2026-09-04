@@ -68,10 +68,13 @@ function gauge(frac, w, color) {
   return `${color}${filled}${RESET}${MUTE}${pad}${RESET}`;
 }
 
-function spark(vals, max) {
+function spark(vals, max, width) {
   if (!vals || !vals.length) return '';
-  const top = max || Math.max(...vals, 1);
-  return vals
+  // Keep the newest samples when the history is wider than the line; fitting
+  // from the left would hide a recent drop behind older high values.
+  const samples = width == null ? vals : vals.slice(-Math.max(1, width));
+  const top = max || Math.max(...samples, 1);
+  return samples
     .map((v) => SPARKS[Math.max(0, Math.min(7, Math.floor(((v || 0) / top) * 7.99)))])
     .join('');
 }
@@ -98,6 +101,10 @@ function box(title, lines, accent) {
 // Right-pad on visible width so columns line up despite colour codes.
 function col(s, n) {
   return s + ' '.repeat(Math.max(0, n - visible(s)));
+}
+
+function sparkWidth(prefix, suffix = '') {
+  return Math.max(1, termWidth() - 2 - visible(prefix) - visible(suffix));
 }
 
 function footerLines(ka, lid) {
@@ -145,11 +152,15 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
     for (const g of gpus) {
       const bars = 22;
       const vramPct = g.memTotal ? (g.memUsed / g.memTotal) * 100 : null;
+      const utilLine =
+        `${col('util', 7)}${gauge(g.gpuUtil / 100, bars, sevColor(g.gpuUtil))} ${BOLD}${col(pct(g.gpuUtil), 5)}${RESET}`;
+      const trendPrefix = `  ${MUTE}trend${RESET} `;
+      const utilTrend =
+        history.gpuUtil && history.gpuUtil.length > 1
+          ? `${trendPrefix}${ACC}${spark(history.gpuUtil, 100, sparkWidth(`${utilLine}${trendPrefix}`))}${RESET}`
+          : '';
       const lines = [
-        `${col('util', 7)}${gauge(g.gpuUtil / 100, bars, sevColor(g.gpuUtil))} ${BOLD}${col(pct(g.gpuUtil), 5)}${RESET}` +
-          (history.gpuUtil && history.gpuUtil.length > 1
-            ? `  ${MUTE}trend${RESET} ${ACC}${spark(history.gpuUtil, 100)}${RESET}`
-            : ''),
+        `${utilLine}${utilTrend}`,
         `${col('memBW', 7)}${gauge(g.memUtil / 100, bars, sevColor(g.memUtil))} ${BOLD}${col(pct(g.memUtil), 5)}${RESET}`,
         `${col('VRAM', 7)}${gauge(vramPct / 100, bars, sevColor(vramPct))} ${BOLD}${gb(g.memUsed)}${RESET}${MUTE}/${gb(g.memTotal)}${RESET}`,
         [
@@ -190,6 +201,7 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
       lines.push(
         `${BOLD}${m.id}${RESET}` +
           (m.params ? `  ${MUTE}${m.params}${m.quant ? ` ${m.quant}` : ''}${RESET}` : '') +
+          (m.format ? `  ${MUTE}${m.format}${RESET}` : '') +
           `  ${gb(m.size)} ${MUTE}loaded${m.vram != null ? ` (${gb(m.vram)} VRAM)` : ''}${RESET}`
       );
       const gpuResident = m.placement === '100% GPU';
@@ -227,11 +239,17 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
   const bars = 16;
   if (v.loaded) {
     const rt = [];
-    if (v.busy != null || v.streaming != null) {
-      rt.push(
-        `${col('state', 10)}${MUTE}busy${RESET} ${BOLD}${v.busy == null ? '—' : v.busy ? 'yes' : 'no'}${RESET}   ` +
-          `${MUTE}streaming${RESET} ${BOLD}${v.streaming == null ? '—' : v.streaming ? 'yes' : 'no'}${RESET}`
-      );
+    if (v.busy != null || v.streaming != null || v.activitySource) {
+      const activity = [];
+      if (v.busy != null) {
+        activity.push(`${MUTE}busy${RESET} ${BOLD}${v.busy ? 'yes' : 'no'}${RESET}`);
+      }
+      if (v.streaming != null) {
+        activity.push(`${MUTE}streaming${RESET} ${BOLD}${v.streaming ? 'yes' : 'no'}${RESET}`);
+      }
+      if (!activity.length) activity.push(`${MUTE}busy${RESET} ${BOLD}—${RESET}`);
+      if (v.activitySource) activity.push(`${MUTE}(${v.activitySource})${RESET}`);
+      rt.push(`${col('state', 10)}${activity.join('   ')}`);
     }
     if (v.requestCountTotal != null) {
       rt.push(`${col('completed', 10)}${BOLD}${v.requestCountTotal}${RESET} ${MUTE}requests${RESET}`);
@@ -289,23 +307,33 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
       }
       tp.push(`${MUTE}last request${RESET}  ${request.join('    ') || `${MUTE}no telemetry${RESET}`}`);
       if (history.requestDecodeRate && history.requestDecodeRate.length > 0) {
+        const trendPrefix = `${MUTE}decode per request${RESET} `;
+        const trendSuffix = ` ${MUTE}(on completion)${RESET}`;
         tp.push(
-          `${MUTE}decode per request${RESET} ${ACC}${spark(history.requestDecodeRate)}${RESET} ${MUTE}(on completion)${RESET}`
+          `${trendPrefix}${ACC}${spark(history.requestDecodeRate, undefined, sparkWidth(trendPrefix, trendSuffix))}${RESET}${trendSuffix}`
         );
       } else if (history.decodeRate && history.decodeRate.length > 1) {
-        tp.push(`${MUTE}decode trend${RESET} ${ACC}${spark(history.decodeRate)}${RESET}`);
+        const trendPrefix = `${MUTE}decode trend${RESET} `;
+        tp.push(
+          `${trendPrefix}${ACC}${spark(history.decodeRate, undefined, sparkWidth(trendPrefix))}${RESET}`
+        );
       }
     } else if (v.metricsDisabled) {
       tp.push(
         `${WARN}metrics endpoint disabled${RESET} ${MUTE}(restart llama-server with --metrics)${RESET}`
       );
+    } else if (v.telemetryUnavailable) {
+      tp.push(`${WARN}throughput unavailable${RESET} ${MUTE}(${v.telemetryUnavailable})${RESET}`);
     } else if (v.promptRate != null || v.decodeRate != null) {
       tp.push(
         `${MUTE}prefill${RESET} ${BOLD}${rate(v.promptRate)}${RESET}    ` +
           `${MUTE}decode${RESET} ${BOLD}${rate(v.decodeRate)}${RESET}`
       );
       if (history.decodeRate && history.decodeRate.length > 1) {
-        tp.push(`${MUTE}decode trend${RESET} ${ACC}${spark(history.decodeRate)}${RESET}`);
+        const trendPrefix = `${MUTE}decode trend${RESET} `;
+        tp.push(
+          `${trendPrefix}${ACC}${spark(history.decodeRate, undefined, sparkWidth(trendPrefix))}${RESET}`
+        );
       }
     } else if (v.metricsError) {
       tp.push(`${WARN}throughput unavailable${RESET} ${MUTE}(/metrics ${v.metricsError})${RESET}`);
@@ -340,7 +368,10 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
       `${MUTE}input${RESET} ${BOLD}${rate(v.promptRate)}${RESET}    ${MUTE}output${RESET} ${BOLD}${rate(v.decodeRate)}${RESET}`,
     ];
     if (history.decodeRate && history.decodeRate.length > 1) {
-      tp.push(`${MUTE}output trend${RESET} ${ACC}${spark(history.decodeRate)}${RESET}`);
+      const trendPrefix = `${MUTE}output trend${RESET} `;
+      tp.push(
+        `${trendPrefix}${ACC}${spark(history.decodeRate, undefined, sparkWidth(trendPrefix))}${RESET}`
+      );
     }
     L.push(...box('Throughput', tp, WARN));
   }

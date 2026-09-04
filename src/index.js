@@ -19,9 +19,14 @@
 // llama.cpp's llama-server (metric names verified against build b10453, see
 // llamacpp-setup-windows.md) has a real Prometheus endpoint, but only when
 // started with --metrics, so everything is read over HTTP with no log tailing.
+// LM Studio's native v1 API exposes loaded model instances and their load
+// configuration through /api/v1/models. Completed request timing is available
+// through `lms log stream --json --stats`, which this provider observes without
+// issuing an inference request of its own.
 //
 // Usage:  node src/index.js [--platform KEY] [--vllm-host URL] [--ollama-host URL]
-//                           [--llamacpp-host URL] [--lemonade-host URL]
+//                           [--llamacpp-host URL] [--lmstudio-host URL]
+//                           [--lmstudio-api-key KEY] [--lemonade-host URL]
 //                           [--lemonade-api-key KEY] [--ollama-log PATH]
 //                           [--interval MS] [--once] [--no-keep-awake]
 
@@ -31,6 +36,7 @@ import { stdin, stdout } from 'node:process';
 import { open, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { startLmStudioLogStream, startLmStudioServerLogStream } from './lmstudio-log.js';
 import { renderTui } from './tui.js';
 import { startKeepAwake, stopKeepAwake, isKeepAwakeActive } from './keep-awake.js';
 import {
@@ -62,6 +68,19 @@ const LEMONADE_HOST = opt('--lemonade-host', process.env.LEMONADE_HOST || 'http:
 const LEMONADE_API_KEY = opt('--lemonade-api-key', process.env.LEMONADE_API_KEY || null);
 const LEMONADE_HEADERS = LEMONADE_API_KEY
   ? { Authorization: `Bearer ${LEMONADE_API_KEY}` }
+  : undefined;
+const LMSTUDIO_HOST = opt(
+  '--lmstudio-host',
+  process.env.LMSTUDIO_HOST || process.env.LM_STUDIO_HOST || 'http://localhost:1234'
+)
+  .replace(/^(?!https?:\/\/)/i, 'http://')
+  .replace(/\/$/, '');
+const LMSTUDIO_API_KEY = opt(
+  '--lmstudio-api-key',
+  process.env.LMSTUDIO_API_KEY || process.env.LM_STUDIO_API_KEY || null
+);
+const LMSTUDIO_HEADERS = LMSTUDIO_API_KEY
+  ? { Authorization: `Bearer ${LMSTUDIO_API_KEY}` }
   : undefined;
 const OLLAMA_LOG = opt('--ollama-log', process.env.OLLAMA_LOG || null);
 const INTERVAL = parseInt(opt('--interval', '2000'), 10);
@@ -805,6 +824,124 @@ class LemonadeProvider {
   }
 }
 
+// LM Studio's native v1 models endpoint lists downloaded models and exposes
+// each loaded instance's context and other load configuration. The lms model
+// log stream supplies completed-request timing, while the server log stream
+// supplies request-start and request-complete events without the monitor
+// becoming the client that generated the request. Activity is therefore
+// explicitly marked as log-inferred rather than a native server-side counter.
+class LmStudioProvider {
+  constructor(host) {
+    this.host = host;
+    this.label = 'LM Studio';
+    this.api = `${host}/api/v1`;
+    this.lastRequest = null;
+    this.requestCountTotal = 0;
+    this.activeRequests = 0;
+    this.logError = null;
+    this.serverLogError = null;
+    this.stopLogStream = startLmStudioLogStream(
+      (event) => {
+        if (event.kind === 'complete') {
+          this.lastRequest = {
+            prefillRate: null,
+            decodeRate: event.decodeRate,
+            promptTokens: event.promptTokens,
+            genTokens: event.genTokens,
+          };
+          this.requestCountTotal += 1;
+        }
+      },
+      (error) => {
+        this.logError = error?.message || String(error);
+      }
+    );
+    this.stopServerLogStream = startLmStudioServerLogStream(
+      (event) => {
+        if (event.kind === 'start') {
+          this.activeRequests += 1;
+          return;
+        }
+        if (event.kind === 'complete') {
+          this.activeRequests = Math.max(0, this.activeRequests - 1);
+        }
+      },
+      (error) => {
+        this.serverLogError = error?.message || String(error);
+      }
+    );
+    process.once('exit', this.stopLogStream);
+    process.once('exit', this.stopServerLogStream);
+  }
+
+  num(value) {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  }
+
+  modelInfo(model, instance) {
+    const config = instance.config && typeof instance.config === 'object' ? instance.config : {};
+    const quantization =
+      model.quantization && typeof model.quantization === 'object' ? model.quantization : {};
+    return {
+      id: instance.id || model.key || model.display_name || '(unnamed)',
+      size: this.num(model.size_bytes),
+      params: typeof model.params_string === 'string' ? model.params_string : null,
+      quant: typeof quantization.name === 'string' ? quantization.name : null,
+      format: typeof model.format === 'string' ? model.format : null,
+      context: this.num(config.context_length),
+      contextTrain: this.num(model.max_context_length),
+    };
+  }
+
+  async poll() {
+    const modelsRes = await fetchText(`${this.api}/models`, 3000, LMSTUDIO_HEADERS);
+    const result = {
+      ok: modelsRes.ok,
+      error: modelsRes.error,
+      models: [],
+      loaded: [],
+      lastRequest: this.lastRequest,
+      requestCountTotal: this.requestCountTotal,
+      busy: this.serverLogError ? null : this.activeRequests > 0,
+      activitySource: this.serverLogError ? 'server log unavailable' : 'server log inferred',
+    };
+    if (!modelsRes.ok) return result;
+
+    let data;
+    try {
+      data = JSON.parse(modelsRes.text);
+    } catch {
+      return { ...result, ok: false, error: 'bad JSON from /api/v1/models' };
+    }
+
+    const catalog = Array.isArray(data?.models)
+      ? data.models.filter((m) => m && typeof m === 'object')
+      : Array.isArray(data?.data)
+        ? data.data.filter((m) => m && typeof m === 'object')
+        : [];
+    const llms = catalog.filter((m) => m.type == null || m.type === 'llm');
+    result.models = llms.map((m) => ({ id: m.key || m.display_name || '(unnamed)', root: m.display_name }));
+
+    for (const model of llms) {
+      const instances = Array.isArray(model.loaded_instances)
+        ? model.loaded_instances.filter((instance) => instance && typeof instance === 'object')
+        : [];
+      for (const instance of instances) result.loaded.push(this.modelInfo(model, instance));
+    }
+
+    result.lastRequest = this.lastRequest;
+    result.requestCountTotal = this.requestCountTotal;
+    result.busy = this.serverLogError ? null : this.activeRequests > 0;
+    result.activitySource = this.serverLogError ? 'server log unavailable' : 'server log inferred';
+    if (!result.lastRequest) {
+      result.telemetryUnavailable = this.logError
+        ? `lms log stream unavailable; ${this.logError}`
+        : 'waiting for a completed request from lms log stream';
+    }
+    return result;
+  }
+}
+
 // ---- platform factory -------------------------------------------------
 // Registry of supported platforms. Add new entries here as providers are
 // implemented; the startup selector and factory are driven by this list.
@@ -812,6 +949,7 @@ const PLATFORMS = [
   { key: 'vllm', label: 'vLLM', host: VLLM_HOST, create: (host) => new VllmProvider(host) },
   { key: 'ollama', label: 'Ollama', host: OLLAMA_HOST, create: (host) => new OllamaProvider(host) },
   { key: 'llamacpp', label: 'llama.cpp', host: LLAMACPP_HOST, create: (host) => new LlamaCppProvider(host) },
+  { key: 'lmstudio', label: 'LM Studio', host: LMSTUDIO_HOST, create: (host) => new LmStudioProvider(host) },
   { key: 'lemonade', label: 'AMD Lemonade', host: LEMONADE_HOST, create: (host) => new LemonadeProvider(host) },
 ];
 
@@ -907,6 +1045,7 @@ async function snapshot(provider, sampled) {
           `  model ${mdl.id}` +
             (mdl.params ? `  ${mdl.params}` : '') +
             (mdl.quant ? ` ${mdl.quant}` : '') +
+            (mdl.format ? ` ${mdl.format}` : '') +
             `  ${gb(mdl.size)} loaded` +
             (mdl.vram != null ? ` (${gb(mdl.vram)} VRAM)` : '')
         );
@@ -931,11 +1070,13 @@ async function snapshot(provider, sampled) {
       }
     }
     if (v.loaded) {
-      if (v.busy != null || v.streaming != null) {
-        L.push(
-          `  request state  busy ${v.busy == null ? '—' : v.busy ? 'yes' : 'no'}` +
-            `  streaming ${v.streaming == null ? '—' : v.streaming ? 'yes' : 'no'}`
-        );
+      if (v.busy != null || v.streaming != null || v.activitySource) {
+        const activity = [];
+        if (v.busy != null) activity.push(`busy ${v.busy ? 'yes' : 'no'}`);
+        if (v.streaming != null) activity.push(`streaming ${v.streaming ? 'yes' : 'no'}`);
+        if (!activity.length) activity.push('busy —');
+        if (v.activitySource) activity.push(`(${v.activitySource})`);
+        L.push(`  request state  ${activity.join('  ')}`);
       }
       if (v.requestCountTotal != null) {
         L.push(`  requests completed  ${v.requestCountTotal}`);
@@ -977,6 +1118,8 @@ async function snapshot(provider, sampled) {
         L.push(`  last request  ${request.join('  ') || 'no telemetry'}`);
       } else if (v.metricsDisabled) {
         L.push('  throughput unavailable (server started without --metrics)');
+      } else if (v.telemetryUnavailable) {
+        L.push(`  throughput unavailable (${v.telemetryUnavailable})`);
       } else if (v.promptRate != null || v.decodeRate != null) {
         // Live when differenced from /slots mid-generation; otherwise the
         // server's own average for the last request that completed.

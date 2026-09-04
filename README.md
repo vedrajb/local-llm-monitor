@@ -11,6 +11,7 @@ The hosting platform is chosen at startup through a pluggable provider
 - **vLLM**
 - **Ollama**
 - **llama.cpp**
+- **LM Studio**
 - **AMD Lemonade**
 
 It reads:
@@ -43,6 +44,13 @@ It reads:
   token counts and decode speed, plus CPU/RAM/GPU/VRAM/NPU host telemetry.
   Lemonade's stats endpoint reports the last completed request; it does not
   expose a queue or live KV-cache occupancy through this provider.
+- **LM Studio** (via `/api/v1/models` + `lms log stream`) — loaded
+  model instances, model size, parameter count, quantization/format, configured
+  context length, maximum supported context, and the token counts/decode speed
+  of completed requests observed after the monitor starts. It also shows
+  server-log-inferred request activity from request start until completion. If
+  `lms log stream` is unavailable, request activity and throughput remain
+  unavailable rather than estimated.
 
 ## Documentation
 
@@ -54,6 +62,8 @@ It reads:
 - **[vllm-setup-windows-wsl2.md](docs/vllm-setup-windows-wsl2.md)** — vLLM host setup,
   including how to restart the server after a reboot.
 - **[llamacpp-setup-windows.md](docs/llamacpp-setup-windows.md)** — llama.cpp host setup.
+- **[lm-studio-setup-windows.md](docs/lm-studio-setup-windows.md)** — LM Studio and
+  Qwen3 host setup.
 - **[amd-lemonade-setup-windows.md](docs/amd-lemonade-setup-windows.md)** — AMD Lemonade host setup for
   `Qwen3-8B-GGUF-Q8_0` on
   Windows.
@@ -64,7 +74,7 @@ An idle server reports zeros, so the queue, KV-cache and throughput panels only
 become readable under load. Two ready-to-run helpers:
 
 - **[10k-word-prompt.md](docs/10k-word-prompt.md)** — one long streaming request per
-  platform (vLLM, Ollama, llama.cpp, AMD Lemonade), each with the right host and payload
+  platform (vLLM, Ollama, llama.cpp, LM Studio, AMD Lemonade), each with the right host and payload
   shape. Exercises **decode throughput** on a single sequence; runs for minutes.
 - **[keep-llm-busy-prompt.txt](docs/keep-llm-busy-prompt.txt)** — 8-way concurrent
   request loop against vLLM until `Ctrl-C`. Use this to drive **slots / running
@@ -78,12 +88,14 @@ npm start                  # live TUI, refreshes every 2s
 npm run ollama             # live TUI, skip the platform prompt
 npm run vllm               # live TUI, skip the platform prompt
 npm run llamacpp           # live TUI, skip the platform prompt
+npm run lmstudio           # live TUI, skip the platform prompt
 npm run lemonade           # live TUI, skip the platform prompt
 npm run plain              # live plain text instead of the TUI
 npm run once               # two samples ~1.5s apart, prints, exits
 npm run once:ollama        # single snapshot of a specific platform
 npm run once:vllm
 npm run once:llamacpp
+npm run once:lmstudio
 npm run once:lemonade
 npm test                   # run the Node test suite
 ```
@@ -118,6 +130,7 @@ node src/index.js                    # live TUI
 node src/index.js --plain            # live plain text
 node src/index.js --once             # takes two samples ~1.5s apart, prints, exits
 node src/index.js --platform ollama  # skip the platform prompt
+node src/index.js --platform lmstudio # monitor LM Studio on :1234
 node src/index.js --platform lemonade # monitor Lemonade on :13305
 ```
 
@@ -163,11 +176,13 @@ the lid-close segment rather than offering a control that does nothing.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--platform KEY` | prompt / first | Platform to monitor: `vllm`, `ollama`, `llamacpp` or `lemonade` (also `LLM_PLATFORM` env) |
+| `--platform KEY` | prompt / first | Platform to monitor: `vllm`, `ollama`, `llamacpp`, `lmstudio` or `lemonade` (also `LLM_PLATFORM` env) |
 | `--vllm-host URL` | `http://localhost:8000` | vLLM base URL (also `VLLM_HOST` env) |
 | `--ollama-host URL` | `http://localhost:11434` | Ollama base URL (also `OLLAMA_HOST` env; a missing `http://` is added) |
 | `--ollama-log PATH` | platform default | Ollama `server.log` to read throughput from (also `OLLAMA_LOG` env) |
 | `--llamacpp-host URL` | `http://localhost:8080` | llama.cpp base URL (also `LLAMACPP_HOST` env; a missing `http://` is added) |
+| `--lmstudio-host URL` | `http://localhost:1234` | LM Studio native API base URL (also `LMSTUDIO_HOST` or `LM_STUDIO_HOST` env; a missing `http://` is added) |
+| `--lmstudio-api-key KEY` | — | Optional LM Studio bearer token (also `LMSTUDIO_API_KEY` or `LM_STUDIO_API_KEY` env) |
 | `--lemonade-host URL` | `http://localhost:13305` | AMD Lemonade server base URL (also `LEMONADE_HOST` env; a missing `http://` is added) |
 | `--lemonade-api-key KEY` | — | Optional Lemonade bearer token (also `LEMONADE_API_KEY` env) |
 | `--interval MS` | `2000` | Refresh / sampling interval |
@@ -335,13 +350,18 @@ a provider reports only what its server can actually answer:
 - Always: `ok`, `error`, `models`.
 - Aggregate-counter style (vLLM): `running`, `waiting`, `kvUsage`,
   `cacheHitRate`, `promptRate`, `decodeRate`.
-- Per-model style (Ollama, llama.cpp, AMD Lemonade): `loaded[]` with `id`,
-  `size`, `params`, `quant`, `context`, and optionally `vram`, `placement`,
-  `device`, `until`, `contextTrain`, `busy`, and `streaming`; plus platform
-  specific `slots`, `kv`, `cacheHit` (add `scope` when it is not the last
-  prompt), `peakTokens`, `promptCache`, and `requestCountTotal`.
+- Per-model style (Ollama, llama.cpp, AMD Lemonade, LM Studio): `loaded[]` with
+  `id`, `size`, `params`, `quant`, `context`, and optionally `format`, `vram`,
+  `placement`, `device`, `until`, `contextTrain`, `busy`, `streaming`, and
+  `activitySource`; plus platform specific `slots`, `kv`, `cacheHit` (add
+  `scope` when it is not the last prompt), `peakTokens`, `promptCache`, and
+  `requestCountTotal`.
 - AMD Lemonade host telemetry: `systemStats` with CPU/RAM/GPU/VRAM/NPU values
   from its `/api/v1/system-stats` endpoint.
+- LM Studio request telemetry: `lastRequest` and `requestCountTotal` are populated
+  from completed `lms log stream --json --stats --source model --filter output`
+  output; `busy` is inferred from the server log stream's request boundaries. The
+  streams only observe requests emitted after the monitor starts.
 - Throughput, first match wins: `lastRequest` (per request, from a log),
   `metricsDisabled`, `promptRate`/`decodeRate` (plus `rateLive` when the rate is
   sampled live rather than read off a completed request),
