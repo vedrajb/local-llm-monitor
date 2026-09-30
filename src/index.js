@@ -239,8 +239,7 @@ function openclawSnapshot(oc) {
     if (r) {
       L.push(
         `  last request  ${r.model ?? '—'}  ${r.runtimeMs != null ? `${(r.runtimeMs / 1000).toFixed(1)}s` : '—'}` +
-          `  input ${r.promptTokens ?? '—'} tok  output ${r.genTokens ?? '—'} tok` +
-          `  ~${rate(r.decodeRate)} end-to-end  ${r.outcome ?? '—'}`
+          `  input ${r.promptTokens ?? '—'} tok  output ${r.genTokens ?? '—'} tok  ${r.outcome ?? '—'}`
       );
     } else {
       L.push('  last request  no completed request in sessions');

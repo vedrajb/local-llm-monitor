@@ -109,8 +109,7 @@ export function summarizeOpenClawRequests(sessions, now = Date.now()) {
           outcome: last.aborted ? 'aborted' : last.status,
           endedAt: last.endedAt,
           prefillRate: null,
-          decodeRate:
-            last.outputTokens != null && runtimeMs ? last.outputTokens / (runtimeMs / 1000) : null,
+          decodeRate: null,
         }
       : null,
   };

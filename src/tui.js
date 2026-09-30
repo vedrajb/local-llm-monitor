@@ -129,8 +129,8 @@ function footerLines(ka, lid) {
   return ['', fit(`  ${parts.join(`${MUTE}  ·  ${RESET}`)}`, termWidth()), ''];
 }
 
-function openclawBoxes(oc, opts, history) {
-  const { gb, pct, rate, duration } = opts;
+function openclawBoxes(oc, opts) {
+  const { gb, pct, duration } = opts;
   const lines = [];
   const agents = [];
   const loop = oc.eventLoop;
@@ -197,16 +197,8 @@ function openclawBoxes(oc, opts, history) {
       );
       requests.push(
         `${col('tokens', 10)}${MUTE}input${RESET} ${BOLD}${r.promptTokens ?? '—'}${RESET}   ` +
-          `${MUTE}output${RESET} ${BOLD}${r.genTokens ?? '—'}${RESET}   ` +
-          `${MUTE}rate${RESET} ${BOLD}~${rate(r.decodeRate)}${RESET} ${MUTE}end-to-end${RESET}`
+          `${MUTE}output${RESET} ${BOLD}${r.genTokens ?? '—'}${RESET}`
       );
-      if (history?.requestDecodeRate && history.requestDecodeRate.length > 0) {
-        const trendPrefix = `${col('trend', 10)}`;
-        const trendSuffix = ` ${MUTE}(per request)${RESET}`;
-        requests.push(
-          `${trendPrefix}${ACC}${spark(history.requestDecodeRate, undefined, sparkWidth(trendPrefix, trendSuffix))}${RESET}${trendSuffix}`
-        );
-      }
     } else {
       requests.push(`${MUTE}no completed request in sessions${RESET}`);
     }
@@ -365,7 +357,7 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
   }
 
   if (v.gateway) {
-    L.push(...(v.gateway.kind === 'hermes' ? hermesBoxes(v.gateway, opts) : openclawBoxes(v.gateway, opts, history)));
+    L.push(...(v.gateway.kind === 'hermes' ? hermesBoxes(v.gateway, opts) : openclawBoxes(v.gateway, opts)));
     L.push(...footerLines(opts.keepAwake, opts.lidAction));
     return L.join('\n');
   }
