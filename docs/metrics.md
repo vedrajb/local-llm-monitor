@@ -172,6 +172,44 @@ For usage and flags see [README.md](README.md). For the sleep-inhibitor see
   pass `--lmstudio-api-key KEY` or set `LMSTUDIO_API_KEY` (the alternate
   `LM_STUDIO_API_KEY` name is also accepted).
 
+## Hermes Agent
+
+Hermes is an agent, not an inference server. It forwards each model call to a
+provider (OpenAI, Nous Portal, or a local server such as Ollama) and receives a
+finished response, so it never sees token timing. **There is no prefill or
+decode rate for Hermes**, and the monitor does not estimate one. For a local
+model, run a second monitor on the model server (for example
+`--platform ollama`) to see real throughput and VRAM placement.
+
+- **Liveness** is `GET /health` on the API server (default
+  `http://127.0.0.1:8642`). It needs no key and decides reachable vs not.
+- **Gateway detail** is `GET /health/detailed`, which needs the API server key.
+  It supplies the gateway state, readiness checks (any check not `ok` is listed
+  as failing), active API runs, pending process completions, active delegations,
+  and today's API-server requests, tokens and p95 latency. Those daily counters
+  cover API-server traffic only; `hermes chat` and TUI turns are not in them.
+- **Per-turn stats come from Hermes's session database**, `state.db`, opened
+  read-only. A turn runs from a `user` message to the next final `assistant`
+  message (one without tool calls); `tool` messages in between are counted as
+  tool calls, and the final message's `finish_reason` is the outcome. This
+  covers every Hermes surface, including `hermes chat` and the TUI.
+  - **Duration** is the gap between the two message timestamps, so it includes
+    tool execution and every model call in the turn.
+  - **Tokens and API calls** are the growth of the session's running totals
+    across the turn, because Hermes does not record tokens per message. They
+    render as `—` for a turn that finished before the monitor started, and when
+    several turns in one session finish between two refreshes.
+  - **Busy** is a turn with no final reply yet whose latest message is under 15
+    minutes old, or any active API run.
+  - With a local model, tokens appear only if the server returns OpenAI-style
+    `usage` in its responses; the other per-turn fields do not depend on it.
+- `state.db` is an internal Hermes schema, not a documented API, so a Hermes
+  update can change it. If it cannot be read, the monitor falls back to
+  `GET /api/sessions` (per-session totals only) and shows why.
+- **Authentication:** the key is taken from `--hermes-api-key`, `HERMES_API_KEY`
+  or `API_SERVER_KEY`, and otherwise read from `API_SERVER_KEY` in Hermes's own
+  `.env`. Without a key only liveness and the `state.db` stats are shown.
+
 ## Unavailable values
 
 Any field a platform cannot supply is `null` and renders as `—`. That is

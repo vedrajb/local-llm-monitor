@@ -14,6 +14,7 @@
     "lmstudio": "node src/index.js --platform lmstudio",
     "lemonade": "node src/index.js --platform lemonade",
     "openclaw": "node src/index.js --platform openclaw",
+    "hermes": "node src/index.js --platform hermes",
     "plain": "node src/index.js --plain",
     "test": "node --test test/*.test.js",
     "once": "node src/index.js --once",
@@ -22,6 +23,7 @@
     "once:llamacpp": "node src/index.js --platform llamacpp --once",
     "once:lmstudio": "node src/index.js --platform lmstudio --once",
     "once:lemonade": "node src/index.js --platform lemonade --once",
+    "once:hermes": "node src/index.js --platform hermes --once",
     "once:openclaw": "node src/index.js --platform openclaw --once"
   },
   "engines": {

@@ -9,7 +9,7 @@ rem self-contained: the tray app inherits them from this process. Keep the setx
 rem values in sync, otherwise launching Ollama from the Start menu gets the
 rem defaults instead.
 
-set "OLLAMA_CONTEXT_LENGTH=16384"
+set "OLLAMA_CONTEXT_LENGTH=32768"
 set "OLLAMA_NUM_PARALLEL=4"
 set "OLLAMA_KEEP_ALIVE=-1"
 set "OLLAMA_FLASH_ATTENTION=1"

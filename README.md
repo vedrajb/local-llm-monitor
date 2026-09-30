@@ -13,6 +13,7 @@ The hosting platform is chosen at startup through a pluggable provider
 - **llama.cpp**
 - **LM Studio**
 - **AMD Lemonade**
+- **Hermes Agent**
 
 It reads:
 
@@ -51,6 +52,12 @@ It reads:
   server-log-inferred request activity from request start until completion. If
   `lms log stream` is unavailable, request activity and throughput remain
   unavailable rather than estimated.
+- **Hermes Agent** (via `/health`, `/health/detailed` and a read-only
+  `state.db`) — gateway state and failing readiness checks, active API runs,
+  pending processes and delegations, today's API-server counters, busy state,
+  and per-turn duration, tokens, API calls, tool calls and outcome for every
+  surface including `hermes chat`. Hermes is an agent in front of a model, so
+  it has no prefill/decode rate; monitor the model server for that.
 
 ## Documentation
 
@@ -69,6 +76,8 @@ It reads:
   Windows.
 - **[openclaw-setup-windows.md](docs/openclaw-setup-windows.md)** — OpenClaw gateway
   setup on native Windows, including local model servers and Tailscale exposure.
+- **[hermes-setup-windows.md](docs/hermes-setup-windows.md)** — Hermes Agent setup on
+  native Windows, local model servers, and enabling the API server for monitoring.
 
 ### Generating load
 
@@ -178,7 +187,7 @@ the lid-close segment rather than offering a control that does nothing.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--platform KEY` | prompt / first | Platform to monitor: `vllm`, `ollama`, `llamacpp`, `lmstudio`, `lemonade` or `openclaw` (also `LLM_PLATFORM` env) |
+| `--platform KEY` | prompt / first | Platform to monitor: `vllm`, `ollama`, `llamacpp`, `lmstudio`, `lemonade`, `openclaw` or `hermes` (also `LLM_PLATFORM` env) |
 | `--vllm-host URL` | `http://localhost:8000` | vLLM base URL (also `VLLM_HOST` env) |
 | `--ollama-host URL` | `http://localhost:11434` | Ollama base URL (also `OLLAMA_HOST` env; a missing `http://` is added) |
 | `--ollama-log PATH` | platform default | Ollama `server.log` to read throughput from (also `OLLAMA_LOG` env) |
@@ -188,6 +197,9 @@ the lid-close segment rather than offering a control that does nothing.
 | `--lemonade-host URL` | `http://localhost:13305` | AMD Lemonade server base URL (also `LEMONADE_HOST` env; a missing `http://` is added) |
 | `--lemonade-api-key KEY` | — | Optional Lemonade bearer token (also `LEMONADE_API_KEY` env) |
 | `--openclaw-host URL` | `http://127.0.0.1:18789` | OpenClaw gateway base URL; polls `/ready` every interval and `openclaw status --json` every 30 s (also `OPENCLAW_HOST` env; a missing `http://` is added) |
+| `--hermes-host URL` | `http://127.0.0.1:8642` | Hermes Agent API server base URL; polls `/health` and `/health/detailed` every interval, with `/api/sessions` as the fallback when `state.db` cannot be read (also `HERMES_HOST` env; a missing `http://` is added) |
+| `--hermes-api-key KEY` | — | Hermes `API_SERVER_KEY` bearer token, needed for `/health/detailed` and sessions (also `HERMES_API_KEY` or `API_SERVER_KEY` env; if unset, read from `API_SERVER_KEY` in Hermes's own `.env`) |
+| `--hermes-db PATH` | `%LOCALAPPDATA%\hermes\state.db` (`~/.hermes/state.db` elsewhere) | Hermes session database, opened read-only for per-turn duration, tokens, API and tool calls, including `hermes chat` turns; falls back to `/api/sessions` if unreadable (also `HERMES_DB` env) |
 | `--interval MS` | `2000` | Refresh / sampling interval |
 | `--plain` | — | Plain text instead of the TUI (also automatic when piped / `NO_COLOR`) |
 | `--once` | — | Print a single snapshot and exit |

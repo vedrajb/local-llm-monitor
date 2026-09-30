@@ -28,7 +28,8 @@
 //                           [--llamacpp-host URL] [--lmstudio-host URL]
 //                           [--lmstudio-api-key KEY] [--lemonade-host URL]
 //                           [--lemonade-api-key KEY] [--ollama-log PATH]
-//                           [--openclaw-host URL]
+//                           [--openclaw-host URL] [--hermes-host URL]
+//                           [--hermes-api-key KEY]
 //                           [--interval MS] [--once] [--no-keep-awake]
 
 import { spawn } from 'node:child_process';
@@ -49,6 +50,7 @@ import { LlamaCppProvider } from './providers/llamacpp.js';
 import { LemonadeProvider } from './providers/lemonade.js';
 import { LmStudioProvider } from './providers/lmstudio.js';
 import { OpenClawProvider } from './providers/openclaw.js';
+import { HermesProvider } from './providers/hermes.js';
 import {
   VLLM_HOST,
   OLLAMA_HOST,
@@ -56,6 +58,9 @@ import {
   LEMONADE_HOST,
   LMSTUDIO_HOST,
   OPENCLAW_HOST,
+  HERMES_HOST,
+  HERMES_HEADERS,
+  HERMES_DB,
   INTERVAL,
   ONCE,
   PLAIN,
@@ -147,6 +152,7 @@ const PLATFORMS = [
   { key: 'lmstudio', label: 'LM Studio', host: LMSTUDIO_HOST, create: (host) => new LmStudioProvider(host) },
   { key: 'lemonade', label: 'AMD Lemonade', host: LEMONADE_HOST, create: (host) => new LemonadeProvider(host) },
   { key: 'openclaw', label: 'OpenClaw', host: OPENCLAW_HOST, create: (host) => new OpenClawProvider(host) },
+  { key: 'hermes', label: 'Hermes Agent', host: HERMES_HOST, create: (host) => new HermesProvider(host, HERMES_HEADERS, HERMES_DB) },
 ];
 
 function createProvider(key) {
@@ -245,6 +251,51 @@ function openclawSnapshot(oc) {
   return L;
 }
 
+function hermesSnapshot(h) {
+  const L = [];
+  L.push(`  state ${h.ready ? 'ready' : 'not ready'}  health ${h.health ?? '—'}`);
+  const d = h.detailed;
+  if (d) {
+    L.push(
+      `  gateway ${d.gatewayState ?? '—'}  status ${d.status ?? '—'}` +
+        `  active runs ${d.activeRuns ?? '—'}  pending processes ${d.pendingProcesses ?? '—'}` +
+        `  delegations ${d.delegations ?? '—'}`
+    );
+  }
+  if (d?.today) {
+    L.push(
+      `  today  ${d.today.requests ?? '—'} requests  ${d.today.tokens ?? '—'} tokens` +
+        `  p95 latency ${d.today.latencyP95Ms != null ? `${d.today.latencyP95Ms} ms` : '—'}`
+    );
+  }
+  if (h.failing.length) L.push(`  failing  ${h.failing.join(', ')}`);
+  if (h.detailedError) L.push(`  detail unavailable (${h.detailedError}; /health/detailed needs API_SERVER_KEY, see --hermes-api-key)`);
+  const q = h.requests;
+  if (q) {
+    L.push(
+      `  request state  busy ${q.busy ? 'yes' : 'no'}` +
+        (q.busy ? ` (${q.running} running${q.activeElapsedMs != null ? `, ${duration(q.activeElapsedMs)} elapsed` : ''})` : '') +
+        (q.source ? `  (${q.source})` : '')
+    );
+    if (q.completed != null) {
+      L.push(`  ${q.source ? 'turns' : 'requests'} completed  ${q.completed} since monitor start`);
+    }
+    const r = q.lastRequest;
+    if (r) {
+      L.push(
+        `  last ${q.source ? 'turn' : 'request'}  ${r.model ?? '—'}  ${r.runtimeMs != null ? `${(r.runtimeMs / 1000).toFixed(1)}s` : '—'}` +
+          `  input ${r.promptTokens ?? '—'} tok  output ${r.genTokens ?? '—'} tok` +
+          (q.source ? `  api calls ${r.apiCalls ?? '—'}  tool calls ${r.toolCalls ?? '—'}` : '') +
+          `  ${r.outcome ?? '—'}`
+      );
+    } else if (q.completed != null) {
+      L.push('  last request  no completed session');
+    }
+  }
+  if (h.requestsError) L.push(`  sessions unavailable (${h.requestsError})`);
+  return L;
+}
+
 async function snapshot(provider, sampled) {
   const [gpus, v] = sampled || (await collect(provider));
   const L = [];
@@ -283,7 +334,7 @@ async function snapshot(provider, sampled) {
   if (!v.ok) {
     L.push(`  server not reachable (${v.error})`);
   } else if (v.gateway) {
-    L.push(...openclawSnapshot(v.gateway));
+    L.push(...(v.gateway.kind === 'hermes' ? hermesSnapshot(v.gateway) : openclawSnapshot(v.gateway)));
   } else {
     if (v.loaded) {
       // Ollama- or llama.cpp-shaped result: one or more resident models, with

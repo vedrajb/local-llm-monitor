@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 export const args = process.argv.slice(2);
 function opt(name, def) {
   const i = args.indexOf(name);
@@ -37,6 +40,29 @@ export const LMSTUDIO_HEADERS = LMSTUDIO_API_KEY
 export const OPENCLAW_HOST = opt('--openclaw-host', process.env.OPENCLAW_HOST || 'http://127.0.0.1:18789')
   .replace(/^(?!https?:\/\/)/i, 'http://')
   .replace(/\/$/, '');
+export const HERMES_HOST = opt('--hermes-host', process.env.HERMES_HOST || 'http://127.0.0.1:8642')
+  .replace(/^(?!https?:\/\/)/i, 'http://')
+  .replace(/\/$/, '');
+export function readHermesEnvKey(envPath) {
+  try {
+    const m = readFileSync(envPath, 'utf8').match(/^API_SERVER_KEY=(.*)$/m);
+    const value = m ? m[1].trim().replace(/^(["'])(.*)\1$/, '$2') : '';
+    return value || null;
+  } catch {
+    return null;
+  }
+}
+const HERMES_HOME =
+  process.env.HERMES_HOME ||
+  (process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'hermes') : join(process.env.HOME || '', '.hermes'));
+export const HERMES_API_KEY = opt(
+  '--hermes-api-key',
+  process.env.HERMES_API_KEY || process.env.API_SERVER_KEY || readHermesEnvKey(join(HERMES_HOME, '.env'))
+);
+export const HERMES_DB = opt('--hermes-db', process.env.HERMES_DB || join(HERMES_HOME, 'state.db'));
+export const HERMES_HEADERS = HERMES_API_KEY
+  ? { Authorization: `Bearer ${HERMES_API_KEY}` }
+  : undefined;
 export const OLLAMA_LOG = opt('--ollama-log', process.env.OLLAMA_LOG || null);
 export const INTERVAL = parseInt(opt('--interval', '2000'), 10);
 export const ONCE = args.includes('--once');

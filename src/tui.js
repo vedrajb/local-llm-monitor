@@ -224,6 +224,82 @@ function openclawBoxes(oc, opts, history) {
   ];
 }
 
+function hermesBoxes(h, opts) {
+  const { duration } = opts;
+  const lines = [];
+  lines.push(
+    `${col('state', 10)}${h.ready ? `${OK}ready${RESET}` : `${WARN}not ready${RESET}`}` +
+      `   ${MUTE}health${RESET} ${BOLD}${h.health ?? '—'}${RESET}`
+  );
+  const d = h.detailed;
+  if (d) {
+    lines.push(
+      `${col('gateway', 10)}${BOLD}${d.gatewayState ?? '—'}${RESET}   ${MUTE}status${RESET} ${BOLD}${d.status ?? '—'}${RESET}`
+    );
+    lines.push(
+      `${col('work', 10)}${MUTE}active runs${RESET} ${BOLD}${d.activeRuns ?? '—'}${RESET}   ` +
+        `${MUTE}pending processes${RESET} ${BOLD}${d.pendingProcesses ?? '—'}${RESET}   ` +
+        `${MUTE}delegations${RESET} ${BOLD}${d.delegations ?? '—'}${RESET}`
+    );
+  }
+  if (d?.today) {
+    lines.push(
+      `${col('today', 10)}${BOLD}${d.today.requests ?? '—'}${RESET} ${MUTE}requests${RESET}   ` +
+        `${BOLD}${d.today.tokens ?? '—'}${RESET} ${MUTE}tokens${RESET}   ` +
+        `${MUTE}p95 latency${RESET} ${BOLD}${d.today.latencyP95Ms != null ? `${d.today.latencyP95Ms} ms` : '—'}${RESET}`
+    );
+  }
+  if (h.failing.length) lines.push(`${col('failing', 10)}${BAD}${h.failing.join(', ')}${RESET}`);
+  if (h.detailedError) {
+    lines.push(
+      `${WARN}detail unavailable${RESET} ${MUTE}(${h.detailedError}; /health/detailed needs API_SERVER_KEY, see --hermes-api-key)${RESET}`
+    );
+  }
+  const requests = [];
+  const q = h.requests;
+  if (q) {
+    requests.push(
+      `${col('state', 10)}${MUTE}busy${RESET} ${BOLD}${q.busy ? 'yes' : 'no'}${RESET}` +
+        (q.busy
+          ? `   ${MUTE}running${RESET} ${BOLD}${q.running}${RESET}` +
+            (q.activeElapsedMs != null ? `   ${MUTE}elapsed${RESET} ${BOLD}${duration(q.activeElapsedMs)}${RESET}` : '')
+          : '') +
+        (q.source ? `   ${MUTE}(${q.source})${RESET}` : '')
+    );
+    if (q.completed != null) {
+      requests.push(
+        `${col('completed', 10)}${BOLD}${q.completed}${RESET} ${MUTE}${q.source ? 'turns' : 'sessions'} since monitor start${RESET}`
+      );
+    }
+    const r = q.lastRequest;
+    if (r) {
+      requests.push(
+        `${col('last', 10)}${BOLD}${r.model ?? '—'}${RESET}   ` +
+          `${MUTE}time${RESET} ${BOLD}${r.runtimeMs != null ? `${(r.runtimeMs / 1000).toFixed(1)}s` : '—'}${RESET}   ` +
+          `${MUTE}outcome${RESET} ${r.outcome === 'done' || r.outcome === 'stop' ? OK : WARN}${r.outcome ?? '—'}${RESET}`
+      );
+      requests.push(
+        `${col('tokens', 10)}${MUTE}input${RESET} ${BOLD}${r.promptTokens ?? '—'}${RESET}   ` +
+          `${MUTE}output${RESET} ${BOLD}${r.genTokens ?? '—'}${RESET}`
+      );
+      if (q.source) {
+        requests.push(
+          `${col('calls', 10)}${MUTE}api${RESET} ${BOLD}${r.apiCalls ?? '—'}${RESET}   ` +
+            `${MUTE}tools${RESET} ${BOLD}${r.toolCalls ?? '—'}${RESET}`
+        );
+      }
+    } else if (q.completed != null) {
+      requests.push(`${MUTE}no completed session${RESET}`);
+    }
+  }
+  if (h.requestsError) {
+    requests.push(`${WARN}sessions unavailable${RESET} ${MUTE}(${h.requestsError})${RESET}`);
+  }
+  const out = [...box('Gateway', lines, !h.ready || h.failing.length ? WARN : ACC)];
+  if (requests.length) out.push(...box('Requests', requests, WARN));
+  return out;
+}
+
 export function renderTui(provider, gpus, v, history, opts = {}) {
   const { gb, pct, rate, interval } = opts;
   const systemGb = (n) => (n == null || Number.isNaN(n) ? '—' : `${n.toFixed(1)} GB`);
@@ -289,7 +365,7 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
   }
 
   if (v.gateway) {
-    L.push(...openclawBoxes(v.gateway, opts, history));
+    L.push(...(v.gateway.kind === 'hermes' ? hermesBoxes(v.gateway, opts) : openclawBoxes(v.gateway, opts, history)));
     L.push(...footerLines(opts.keepAwake, opts.lidAction));
     return L.join('\n');
   }
