@@ -130,7 +130,8 @@ so the load test does not mix with your normal conversations, and it does not
 deliver the reply to any chat channel.
 
 Start `npm run openclaw` in another terminal to watch the gateway while the
-request runs.
+request runs. It shows the run time and token counts, not a tokens-per-second
+rate; to measure model speed, also monitor the model server the agent uses.
 
 ```bash
 openclaw agent --session-id load-test --thinking off --timeout 900 --message "explain stormlight archive in 10000 words."

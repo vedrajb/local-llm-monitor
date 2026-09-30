@@ -13,6 +13,7 @@ The hosting platform is chosen at startup through a pluggable provider
 - **llama.cpp**
 - **LM Studio**
 - **AMD Lemonade**
+- **OpenClaw**
 - **Hermes Agent**
 
 It reads:
@@ -52,6 +53,11 @@ It reads:
   server-log-inferred request activity from request start until completion. If
   `lms log stream` is unavailable, request activity and throughput remain
   unavailable rather than estimated.
+- **OpenClaw** (via `/ready`, `openclaw gateway call sessions.list` and
+  `openclaw status --json`) — gateway readiness, uptime and event-loop health,
+  process, task and session counts, busy state, completed requests, and the last
+  request's model, run time, tokens and outcome. OpenClaw is a gateway in front
+  of a model, so it has no prefill/decode rate; monitor the model server for that.
 - **Hermes Agent** (via `/health`, `/health/detailed` and a read-only
   `state.db`) — gateway state and failing readiness checks, active API runs,
   pending processes and delegations, today's API-server counters, busy state,

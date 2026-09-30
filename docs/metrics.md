@@ -172,6 +172,23 @@ For usage and flags see [README.md](README.md). For the sleep-inhibitor see
   pass `--lmstudio-api-key KEY` or set `LMSTUDIO_API_KEY` (the alternate
   `LM_STUDIO_API_KEY` name is also accepted).
 
+## OpenClaw
+
+OpenClaw is a gateway in front of a model, like Hermes. A run's time includes
+tool calls, every model call in the run, queueing and prompt prefill, so
+dividing output tokens by it does not measure model speed. **There is no
+prefill or decode rate for OpenClaw**; monitor the model server for that.
+
+- **Readiness** is `GET /ready`, polled every interval: ready state, failing
+  checks, uptime, and event-loop p99 delay, utilization and degraded reasons.
+- **Requests** come from `openclaw gateway call sessions.list --json` every 3 s:
+  busy state and elapsed time of running sessions, runs completed since the
+  monitor started, and the last run's model, run time, input and output tokens
+  and outcome.
+- **Process and agent state** comes from `openclaw status --json` every 30 s:
+  version, pid, RSS, connect latency, task counts by status, sessions, channels,
+  and degraded model runtime or plugins.
+
 ## Hermes Agent
 
 Hermes is an agent, not an inference server. It forwards each model call to a
