@@ -28,15 +28,12 @@
 //                           [--llamacpp-host URL] [--lmstudio-host URL]
 //                           [--lmstudio-api-key KEY] [--lemonade-host URL]
 //                           [--lemonade-api-key KEY] [--ollama-log PATH]
+//                           [--openclaw-host URL]
 //                           [--interval MS] [--once] [--no-keep-awake]
 
 import { spawn } from 'node:child_process';
 import readline from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import { open, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { startLmStudioLogStream, startLmStudioServerLogStream } from './lmstudio-log.js';
 import { renderTui } from './tui.js';
 import { startKeepAwake, stopKeepAwake, isKeepAwakeActive } from './keep-awake.js';
 import {
@@ -46,48 +43,26 @@ import {
   isLidActionSupported,
 } from './lid-action.js';
 
-const args = process.argv.slice(2);
-function opt(name, def) {
-  const i = args.indexOf(name);
-  return i >= 0 && args[i + 1] ? args[i + 1] : def;
-}
-const VLLM_HOST = opt('--vllm-host', process.env.VLLM_HOST || 'http://localhost:8000').replace(/\/$/, '');
-// OLLAMA_HOST is conventionally set without a scheme (e.g. "127.0.0.1:11434"),
-// which fetch() rejects, so add one when it is missing.
-const OLLAMA_HOST = opt('--ollama-host', process.env.OLLAMA_HOST || 'http://localhost:11434')
-  .replace(/^(?!https?:\/\/)/i, 'http://')
-  .replace(/\/$/, '');
-// llama.cpp binds 127.0.0.1:8080 by default. Its own LLAMA_ARG_HOST holds a
-// bare address rather than a URL, so it is deliberately not read here.
-const LLAMACPP_HOST = opt('--llamacpp-host', process.env.LLAMACPP_HOST || 'http://localhost:8080')
-  .replace(/^(?!https?:\/\/)/i, 'http://')
-  .replace(/\/$/, '');
-const LEMONADE_HOST = opt('--lemonade-host', process.env.LEMONADE_HOST || 'http://localhost:13305')
-  .replace(/^(?!https?:\/\/)/i, 'http://')
-  .replace(/\/$/, '');
-const LEMONADE_API_KEY = opt('--lemonade-api-key', process.env.LEMONADE_API_KEY || null);
-const LEMONADE_HEADERS = LEMONADE_API_KEY
-  ? { Authorization: `Bearer ${LEMONADE_API_KEY}` }
-  : undefined;
-const LMSTUDIO_HOST = opt(
-  '--lmstudio-host',
-  process.env.LMSTUDIO_HOST || process.env.LM_STUDIO_HOST || 'http://localhost:1234'
-)
-  .replace(/^(?!https?:\/\/)/i, 'http://')
-  .replace(/\/$/, '');
-const LMSTUDIO_API_KEY = opt(
-  '--lmstudio-api-key',
-  process.env.LMSTUDIO_API_KEY || process.env.LM_STUDIO_API_KEY || null
-);
-const LMSTUDIO_HEADERS = LMSTUDIO_API_KEY
-  ? { Authorization: `Bearer ${LMSTUDIO_API_KEY}` }
-  : undefined;
-const OLLAMA_LOG = opt('--ollama-log', process.env.OLLAMA_LOG || null);
-const INTERVAL = parseInt(opt('--interval', '2000'), 10);
-const ONCE = args.includes('--once');
-const PLAIN = args.includes('--plain');
-const PLATFORM = opt('--platform', process.env.LLM_PLATFORM || null);
-const KEEP_AWAKE = !args.includes('--no-keep-awake');
+import { VllmProvider } from './providers/vllm.js';
+import { OllamaProvider } from './providers/ollama.js';
+import { LlamaCppProvider } from './providers/llamacpp.js';
+import { LemonadeProvider } from './providers/lemonade.js';
+import { LmStudioProvider } from './providers/lmstudio.js';
+import { OpenClawProvider } from './providers/openclaw.js';
+import {
+  VLLM_HOST,
+  OLLAMA_HOST,
+  LLAMACPP_HOST,
+  LEMONADE_HOST,
+  LMSTUDIO_HOST,
+  OPENCLAW_HOST,
+  INTERVAL,
+  ONCE,
+  PLAIN,
+  PLATFORM,
+  KEEP_AWAKE,
+} from './config.js';
+
 
 // ---- helpers ----------------------------------------------------------
 function gb(bytes) {
@@ -99,6 +74,16 @@ function pct(n) {
 }
 function rate(n) {
   return n == null || Number.isNaN(n) ? '—' : n.toFixed(1) + ' tok/s';
+}
+function duration(ms) {
+  if (ms == null || Number.isNaN(ms)) return '—';
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  return `${m}m ${s % 60}s`;
 }
 
 // ---- nvidia-smi -------------------------------------------------------
@@ -151,796 +136,6 @@ function nvidiaSmi() {
   });
 }
 
-// ---- shared HTTP helper ----------------------------------------------
-async function fetchText(url, timeoutMs = 3000, headers) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { signal: ctrl.signal, headers });
-    clearTimeout(t);
-    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
-    return { ok: true, text: await res.text() };
-  } catch (e) {
-    clearTimeout(t);
-    return { ok: false, error: e.name === 'AbortError' ? 'timeout' : String(e.message || e) };
-  }
-}
-
-// ---- vLLM provider ----------------------------------------------------
-// Minimal Prometheus parser: returns a map of metricName -> summed value
-// across labels. Good enough for a single-model server (one label set per
-// metric).
-function parsePrometheus(text) {
-  const m = new Map();
-  for (const line of text.split(/\r?\n/)) {
-    if (!line || line[0] === '#') continue;
-    // name{labels} value   OR   name value
-    const sp = line.lastIndexOf(' ');
-    if (sp < 0) continue;
-    const rawName = line.slice(0, sp);
-    const val = parseFloat(line.slice(sp + 1));
-    if (Number.isNaN(val)) continue;
-    const brace = rawName.indexOf('{');
-    const name = brace >= 0 ? rawName.slice(0, brace) : rawName;
-    m.set(name, (m.get(name) || 0) + val);
-  }
-  return m;
-}
-
-class VllmProvider {
-  constructor(host) {
-    this.host = host;
-    this.label = 'vLLM';
-    // Remember previous counter values so we can turn them into rates.
-    this.prev = null; // { t, prompt, generation }
-    // Exponentially weighted moving averages so the reported rate tracks
-    // vLLM's smoothed log figure instead of jumping around with each short
-    // poll window.
-    this.EWMA_ALPHA = 0.3;
-    this.promptEwma = null;
-    this.decodeEwma = null;
-  }
-
-  ewma(prevVal, sample) {
-    if (sample == null || Number.isNaN(sample)) return prevVal;
-    return prevVal == null ? sample : this.EWMA_ALPHA * sample + (1 - this.EWMA_ALPHA) * prevVal;
-  }
-
-  async poll() {
-    const [metricsRes, modelsRes] = await Promise.all([
-      fetchText(`${this.host}/metrics`),
-      fetchText(`${this.host}/v1/models`),
-    ]);
-
-    const result = { ok: metricsRes.ok, error: metricsRes.error, models: [] };
-
-    if (modelsRes.ok) {
-      try {
-        const data = JSON.parse(modelsRes.text);
-        result.models = (data.data || []).map((m) => ({ id: m.id, root: m.root }));
-      } catch {}
-    }
-
-    if (!metricsRes.ok) return result;
-
-    const m = parsePrometheus(metricsRes.text);
-    const now = Date.now();
-    const promptTotal = m.get('vllm:prompt_tokens_total');
-    const genTotal = m.get('vllm:generation_tokens_total');
-
-    // Rate = delta / elapsed seconds.
-    if (this.prev && promptTotal != null && genTotal != null) {
-      const dt = (now - this.prev.t) / 1000;
-      if (dt > 0) {
-        const promptSample = Math.max(0, (promptTotal - this.prev.prompt) / dt);
-        const decodeSample = Math.max(0, (genTotal - this.prev.generation) / dt);
-        this.promptEwma = this.ewma(this.promptEwma, promptSample);
-        this.decodeEwma = this.ewma(this.decodeEwma, decodeSample);
-        result.promptRate = this.promptEwma;
-        result.decodeRate = this.decodeEwma;
-      }
-    }
-    this.prev = { t: now, prompt: promptTotal ?? 0, generation: genTotal ?? 0 };
-
-    result.running = m.get('vllm:num_requests_running');
-    result.waiting = m.get('vllm:num_requests_waiting');
-    // KV cache usage is reported as a fraction (0..1) in recent vLLM.
-    const kv = m.get('vllm:kv_cache_usage_perc') ?? m.get('vllm:gpu_cache_usage_perc');
-    result.kvUsage = kv != null ? kv * 100 : null;
-    // Prefix cache hit rate = hits / queries (cumulative counters).
-    const cacheHits = m.get('vllm:prefix_cache_hits_total');
-    const cacheQueries = m.get('vllm:prefix_cache_queries_total');
-    result.cacheHitRate =
-      cacheQueries != null && cacheQueries > 0 && cacheHits != null
-        ? (cacheHits / cacheQueries) * 100
-        : null;
-    result.promptTotal = promptTotal;
-    result.genTotal = genTotal;
-    return result;
-  }
-}
-
-// ---- Ollama provider --------------------------------------------------
-// Ollama's bundled llama-server writes per-request timings and slot activity to
-// server.log at default verbosity, so tailing it yields the real throughput of
-// every client — unlike the HTTP API, which reports counters only to whoever
-// made the request. Linux service installs log to journald instead of a file,
-// in which case throughput is simply reported as unavailable.
-function ollamaLogPath() {
-  if (OLLAMA_LOG) return OLLAMA_LOG;
-  if (process.platform === 'win32') {
-    const local = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
-    return join(local, 'Ollama', 'server.log');
-  }
-  if (process.platform === 'darwin') return join(homedir(), '.ollama', 'logs', 'server.log');
-  return join(homedir(), '.ollama', 'logs', 'server.log');
-}
-
-// Read at most the last `maxBytes` of the log; the file grows without bound and
-// only the newest lines matter at a 2s poll interval.
-async function tailFile(path, maxBytes = 256 * 1024) {
-  let fh;
-  try {
-    const info = await stat(path);
-    if (!info.isFile()) return null;
-    fh = await open(path, 'r');
-    const len = Math.min(info.size, maxBytes);
-    const buf = Buffer.alloc(len);
-    await fh.read(buf, 0, len, Math.max(0, info.size - len));
-    const text = buf.toString('utf8');
-    // A truncated read starts mid-line; drop that fragment so it cannot be
-    // parsed as a partial record.
-    return info.size > len ? text.slice(text.indexOf('\n') + 1) : text;
-  } catch {
-    return null;
-  } finally {
-    if (fh) await fh.close().catch(() => {});
-  }
-}
-
-class OllamaProvider {
-  constructor(host) {
-    this.host = host;
-    this.label = 'Ollama';
-    this.logPath = ollamaLogPath();
-    // The slot count only appears in the startup banner, which scrolls out of
-    // the tail window on a long-running server, so remember it once seen.
-    this.slotTotal = null;
-    // Ollama rotates server.log, which drops the recent history out of view;
-    // hold the last reading so throughput does not blank out mid-session.
-    this.lastRequest = null;
-    this.slots = null;
-    this.kv = null;
-    this.cacheHit = null;
-    this.promptCache = null;
-    // Printed only on "new prompt", so remember it for the KV total.
-    this.ctxPerSlot = null;
-  }
-
-  // llama.cpp prints one print_timing block per finished request:
-  //   slot print_timing: id 0 | task 9530 | prompt eval time = ... (687.14 tokens per second)
-  //   slot print_timing: id 0 | task 9530 |        eval time = ... ( 65.88 tokens per second)
-  // Whitespace around the field names varies, so match loosely and keep the
-  // last (most recent) block in the tail. Note "prompt eval" counts only the
-  // tokens actually evaluated: a prefix-cache hit leaves 1 token here, so the
-  // rate is reported alongside its token count rather than on its own.
-  parseTimings(text) {
-    const re =
-      /slot\s+print_timing:\s+id\s+(\d+)\s+\|\s+task\s+(\d+)\s+\|\s+(prompt eval|eval)\s+time\s+=\s+([\d.]+)\s+ms\s+\/\s+(\d+)\s+tokens[^)]*?([\d.]+)\s+tokens per second/g;
-    const tasks = new Map();
-    for (const m of text.matchAll(re)) {
-      const task = m[2];
-      const entry = tasks.get(task) || { slot: Number(m[1]), task };
-      if (m[3] === 'prompt eval') {
-        entry.prefillRate = parseFloat(m[6]);
-        entry.promptTokens = Number(m[5]);
-      } else {
-        entry.decodeRate = parseFloat(m[6]);
-        entry.genTokens = Number(m[5]);
-      }
-      tasks.set(task, entry);
-    }
-    const all = [...tasks.values()];
-    return all.length ? all[all.length - 1] : null;
-  }
-
-  // Slots go busy on "launch_slot_ ... processing task". A client that
-  // disconnects mid-generation never produces a matching "release", so the
-  // per-request "print_timing" block — which llama.cpp emits for every task
-  // that ran, abandoned or not — is what frees a slot here. "all slots are
-  // idle" is an explicit reset that supersedes both.
-  parseSlots(text) {
-    const np = [...text.matchAll(/-np\s+(\d+)/g)].pop();
-    if (np) this.slotTotal = Number(np[1]);
-    const events =
-      /slot\s+launch_slot_:\s+id\s+(\d+)\s+\|\s+task\s+(\d+)\s+\|\s+processing task|slot\s+(?:release|print_timing):\s+id\s+(\d+)\s+\|\s+task\s+(\d+)\s+\||srv\s+update_slots:\s+all slots are idle/g;
-    const busy = new Set();
-    let saw = false;
-    for (const m of text.matchAll(events)) {
-      saw = true;
-      if (m[1] != null) busy.add(m[2]);
-      else if (m[3] != null) busy.delete(m[4]);
-      else busy.clear();
-    }
-    // Fall back to the highest slot id ever seen when the banner is gone.
-    const seen = [...text.matchAll(/slot\s+\S+:\s+id\s+(\d+)\s+\|/g)].map((m) => Number(m[1]));
-    const total = this.slotTotal ?? (seen.length ? Math.max(...seen) + 1 : null);
-    return saw ? { busy: busy.size, total } : null;
-  }
-
-  // KV occupancy: each slot holds up to n_ctx_slot tokens, and a slot's current
-  // token count is printed on "new prompt" and again on "release". Summing the
-  // latest figure per slot against slots * n_ctx_slot gives the occupancy of
-  // the KV pool, which is the closest analogue to vLLM's kv_cache_usage_perc.
-  parseKvUsage(text) {
-    const ev =
-      /slot\s+operator\(\):\s+id\s+(\d+)\s+\|\s+task\s+\d+\s+\|\s+new prompt,\s+n_ctx_slot\s+=\s+(\d+)[^\n]*?task\.n_tokens\s+=\s+(\d+)|slot\s+release:\s+id\s+(\d+)\s+\|\s+task\s+\d+\s+\|\s+stop processing:\s+n_tokens\s+=\s+(\d+)/g;
-    const occ = new Map();
-    for (const m of text.matchAll(ev)) {
-      if (m[1] != null) {
-        this.ctxPerSlot = Number(m[2]);
-        occ.set(m[1], Number(m[3]));
-      } else {
-        occ.set(m[4], Number(m[5]));
-      }
-    }
-    if (!occ.size || this.ctxPerSlot == null) return null;
-    const slots = this.slotTotal ?? occ.size;
-    const total = this.ctxPerSlot * slots;
-    const used = [...occ.values()].reduce((a, b) => a + b, 0);
-    return total > 0 ? { used, total, pct: (used / total) * 100 } : null;
-  }
-
-  // Prefix reuse: llama.cpp reports how much of each prompt it recovered from
-  // cache ("cached n_tokens") against the prompt length ("task.n_tokens"),
-  // which is the per-request equivalent of vLLM's prefix cache hit rate.
-  parseCacheHit(text) {
-    const re =
-      /slot\s+operator\(\):\s+id\s+\d+\s+\|\s+task\s+(\d+)\s+\|\s+new prompt[^\n]*?task\.n_tokens\s+=\s+(\d+)[\s\S]{0,400}?cached n_tokens\s+=\s+(\d+)/g;
-    const all = [...text.matchAll(re)];
-    if (!all.length) return null;
-    const m = all[all.length - 1];
-    const prompt = Number(m[2]);
-    const cached = Number(m[3]);
-    return prompt > 0 ? { prompt, cached, pct: (cached / prompt) * 100 } : null;
-  }
-
-  // The prompt cache is a host-RAM store of idle slots' prompts, sized by
-  // --cache-ram; it is not the KV pool, so it is reported separately.
-  parsePromptCache(text) {
-    const m = [
-      ...text.matchAll(
-        /cache state:\s+(\d+)\s+prompts,\s+([\d.]+)\s+MiB\s+\(limits:\s+([\d.]+)\s+MiB/g
-      ),
-    ].pop();
-    if (!m) return null;
-    return { prompts: Number(m[1]), mib: parseFloat(m[2]), limitMib: parseFloat(m[3]) };
-  }
-
-  // Ollama reports loaded model bytes (size) and the portion resident in VRAM
-  // (size_vram); the ratio is what `ollama ps` prints as its PROCESSOR column.
-  placement(size, vram) {
-    if (!Number.isFinite(size) || !Number.isFinite(vram) || size <= 0) return null;
-    if (vram <= 0) return '100% CPU';
-    if (vram >= size) return '100% GPU';
-    const cpu = Math.round(((size - vram) / size) * 100);
-    return `${cpu}%/${100 - cpu}% CPU/GPU`;
-  }
-
-  // A keep-alive of -1 pins the model and reports a date centuries out, so
-  // anything beyond a year reads as "forever" instead of an absurd timestamp.
-  expiry(expiresAt) {
-    const t = Date.parse(expiresAt);
-    if (Number.isNaN(t)) return null;
-    const days = (t - Date.now()) / 86400000;
-    if (days > 365) return 'forever';
-    if (days < 0) return 'expired';
-    return new Date(t).toLocaleTimeString();
-  }
-
-  async poll() {
-    const [psRes, logText] = await Promise.all([
-      fetchText(`${this.host}/api/ps`),
-      tailFile(this.logPath),
-    ]);
-    const result = { ok: psRes.ok, error: psRes.error, models: [] };
-    if (logText == null) {
-      result.logMissing = this.logPath;
-    } else {
-      this.lastRequest = this.parseTimings(logText) ?? this.lastRequest;
-      this.slots = this.parseSlots(logText) ?? this.slots;
-      this.kv = this.parseKvUsage(logText) ?? this.kv;
-      this.cacheHit = this.parseCacheHit(logText) ?? this.cacheHit;
-      this.promptCache = this.parsePromptCache(logText) ?? this.promptCache;
-      result.lastRequest = this.lastRequest;
-      result.slots = this.slots;
-      // Reported per token pool, not as vLLM's single kvUsage percentage.
-      result.kv = this.kv;
-      result.cacheHit = this.cacheHit;
-      result.promptCache = this.promptCache;
-    }
-    if (!psRes.ok) return result;
-
-    let data;
-    try {
-      data = JSON.parse(psRes.text);
-    } catch {
-      return { ...result, ok: false, error: 'bad JSON from /api/ps' };
-    }
-
-    const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-    const entries = Array.isArray(data.models) ? data.models.filter((m) => m && typeof m === 'object') : [];
-    result.loaded = entries.map((m) => {
-      const size = num(m.size);
-      const vram = num(m.size_vram);
-      return {
-        id: m.name || m.model || '(unnamed)',
-        size,
-        vram,
-        placement: this.placement(size, vram),
-        context: num(m.context_length),
-        quant: m.details && m.details.quantization_level,
-        params: m.details && m.details.parameter_size,
-        until: this.expiry(m.expires_at),
-      };
-    });
-    result.models = result.loaded.map((m) => ({ id: m.id }));
-    return result;
-  }
-}
-
-// ---- llama.cpp provider -----------------------------------------------
-// llama-server exposes a genuine Prometheus endpoint — the thing Ollama lacks —
-// so nothing here parses a log. It is off unless the server was started with
-// --metrics, which is why /props is polled too: it reports endpoint_metrics,
-// turning an empty throughput panel into a diagnosis. Metric names verified
-// against to_metrics() in tools/server/server-task.cpp at build b10453.
-//
-// The throughput gauges cannot carry a live reading, which is the one thing that
-// shapes this provider. llama.cpp commits prompt/predict timings only when a
-// request *finishes*, and the gauge is steps/accumulated-decode-time over a
-// bucket that reset_bucket() empties on every /metrics read — returning 0 while
-// time == 0. Both were measured: through a 900-token generation
-// tokens_predicted_total stayed frozen and the gauge read 0 on every poll, so
-// differencing the counter would not help either. Worse, whichever client reads
-// /metrics first drains the bucket, so a browser on the built-in web UI or a
-// second monitor silently steals the reading.
-//
-// So decode rate is differenced from /slots instead, where n_decoded does climb
-// live, and the gauge is used only when nothing is in flight — where it reports
-// the last completed request. Prefill has no live equivalent (it lands in one
-// batch), and reads 0 during decode, which is the truth: nothing is prefilling.
-//
-// Separately, llamacpp:prompt_tokens_total counts only tokens actually
-// evaluated, so prefix reuse is cached/(cached + evaluated) rather than a
-// hits/queries ratio.
-//
-// There is no KV-usage metric, so occupancy is read from /slots (enabled by
-// default): every slot reports its own n_ctx and what it currently holds.
-// Model bytes, parameter count, quant and context come from /v1/models, whose
-// meta block carries size, n_params, ftype and n_ctx.
-//
-// VRAM residency is not exposed over HTTP at all. With -ngl below full offload
-// the CPU spill is invisible here, so placement is left unreported rather than
-// guessed, and the nvidia-smi VRAM gauge above is the signal to read instead.
-class LlamaCppProvider {
-  constructor(host) {
-    this.host = host;
-    this.label = 'llama.cpp';
-    // Previous /slots sample, for differencing n_decoded into a live rate.
-    this.prev = null; // { t, slots: Map(slotId -> { task, decoded }) }
-  }
-
-  // Tokens decoded since the previous poll, over wall-clock. Only slots that are
-  // still processing count: an idle slot keeps its finished task's n_decoded, so
-  // reading it would replay tokens that already happened. A slot that has moved
-  // on to a new task restarts its count, so deltas are taken within one task
-  // only — the tail of the request it just finished is what the gauge reports.
-  liveDecodeRate(slots, now) {
-    const cur = new Map();
-    for (const s of slots) {
-      if (!s.is_processing) continue;
-      const decoded = Number(s.next_token?.[0]?.n_decoded);
-      if (!Number.isFinite(decoded)) continue;
-      cur.set(String(s.id), { task: String(s.id_task ?? ''), decoded });
-    }
-    let rate = null;
-    if (this.prev && cur.size) {
-      const dt = (now - this.prev.t) / 1000;
-      if (dt > 0) {
-        let delta = 0;
-        for (const [id, c] of cur) {
-          const p = this.prev.slots.get(id);
-          if (p && p.task === c.task && c.decoded > p.decoded) delta += c.decoded - p.decoded;
-        }
-        if (delta > 0) rate = delta / dt;
-      }
-    }
-    // Always advance, so an idle gap cannot later look like one huge delta.
-    this.prev = { t: now, slots: cur };
-    return rate;
-  }
-
-  // n_params is a raw count, but the model panels elsewhere show "8.2B"-style
-  // sizes, so match them.
-  paramSize(n) {
-    if (!Number.isFinite(n) || n <= 0) return null;
-    if (n >= 1e12) return (n / 1e12).toFixed(1) + 'T';
-    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
-    if (n >= 1e6) return Math.round(n / 1e6) + 'M';
-    return String(n);
-  }
-
-  // Each slot owns an independent n_ctx window and n_prompt_tokens is what it
-  // holds right now, so summing across slots gives the occupancy of the whole
-  // KV pool — the closest analogue to vLLM's kv_cache_usage_perc. Tokens stay
-  // resident after a request finishes, so this reads non-zero on an idle server
-  // that has served anything: that is the prefix cache, not a leak.
-  kvFromSlots(slots) {
-    let used = 0;
-    let total = 0;
-    for (const s of slots) {
-      const ctx = Number(s.n_ctx);
-      const held = Number(s.n_prompt_tokens);
-      if (Number.isFinite(ctx) && ctx > 0) total += ctx;
-      if (Number.isFinite(held) && held > 0) used += held;
-    }
-    return total > 0 ? { used, total, pct: (used / total) * 100 } : null;
-  }
-
-  async poll() {
-    const [propsRes, modelsRes, slotsRes, metricsRes] = await Promise.all([
-      fetchText(`${this.host}/props`),
-      fetchText(`${this.host}/v1/models`),
-      fetchText(`${this.host}/slots`),
-      fetchText(`${this.host}/metrics`),
-    ]);
-
-    // /props answers even while the model is sleeping and needs no API key, so
-    // it decides reachability. A failing /metrics usually means only that
-    // --metrics was omitted, which is not the server being down.
-    const result = { ok: propsRes.ok, error: propsRes.error, models: [] };
-    if (!propsRes.ok) return result;
-
-    let props = null;
-    try {
-      props = JSON.parse(propsRes.text);
-    } catch {
-      return { ...result, ok: false, error: 'bad JSON from /props' };
-    }
-
-    const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-
-    // Model identity and geometry. Fall back to /props when /v1/models is
-    // unavailable: it carries the alias, ftype and context but not the bytes.
-    let meta = null;
-    let modelId = props.model_alias || null;
-    if (modelsRes.ok) {
-      try {
-        const data = JSON.parse(modelsRes.text);
-        const info = Array.isArray(data.data) ? data.data[0] : null;
-        if (info) {
-          modelId = info.id || modelId;
-          meta = info.meta || null;
-        }
-      } catch {}
-    }
-    result.loaded = modelId
-      ? [
-          {
-            id: modelId,
-            size: meta ? num(meta.size) : null,
-            context: (meta ? num(meta.n_ctx) : null) ?? num(props.default_generation_settings?.n_ctx),
-            contextTrain: meta ? num(meta.n_ctx_train) : null,
-            params: this.paramSize(meta ? num(meta.n_params) : null),
-            quant: (meta && meta.ftype) || props.model_ftype || null,
-          },
-        ]
-      : [];
-    result.models = result.loaded.map((m) => ({ id: m.id }));
-
-    let liveDecode = null;
-    if (slotsRes.ok) {
-      try {
-        const arr = JSON.parse(slotsRes.text);
-        if (Array.isArray(arr)) {
-          const slots = arr.filter((s) => s && typeof s === 'object');
-          result.slots = { busy: slots.filter((s) => s.is_processing).length, total: slots.length };
-          result.kv = this.kvFromSlots(slots);
-          liveDecode = this.liveDecodeRate(slots, Date.now());
-        }
-      } catch {}
-    }
-
-    if (props.endpoint_metrics === false) {
-      result.metricsDisabled = true;
-    } else if (!metricsRes.ok) {
-      result.metricsError = metricsRes.error;
-    } else {
-      const m = parsePrometheus(metricsRes.text);
-      result.promptRate = m.get('llamacpp:prompt_tokens_seconds');
-      result.decodeRate = m.get('llamacpp:predicted_tokens_seconds');
-      result.running = m.get('llamacpp:requests_processing');
-      result.waiting = m.get('llamacpp:requests_deferred');
-      result.promptTotal = m.get('llamacpp:prompt_tokens_total');
-      result.genTotal = m.get('llamacpp:tokens_predicted_total');
-      result.peakTokens = m.get('llamacpp:n_tokens_max');
-      // prompt_tokens_total excludes cached tokens, so the two counters sum to
-      // every prompt token the server has been asked to handle.
-      const cached = m.get('llamacpp:prompt_tokens_cached_total');
-      if (cached != null && result.promptTotal != null) {
-        const seen = cached + result.promptTotal;
-        if (seen > 0) {
-          result.cacheHit = {
-            cached,
-            prompt: seen,
-            pct: (cached / seen) * 100,
-            scope: 'of all prompt tokens',
-          };
-        }
-      }
-    }
-
-    // A request in flight has no committed gauge, so the differenced /slots rate
-    // is the only real reading; it also wins over a gauge left behind by an
-    // earlier request, which would otherwise be reported as if it were current.
-    if (liveDecode != null) {
-      result.decodeRate = liveDecode;
-      result.rateLive = true;
-    }
-
-    // --no-slots leaves no per-slot data, but /props still knows the slot count
-    // and /metrics the busy count, which is enough for the occupancy bar.
-    if (!result.slots && props.total_slots != null && result.running != null) {
-      result.slots = { busy: result.running, total: num(props.total_slots) };
-    }
-    return result;
-  }
-}
-
-class LemonadeProvider {
-  constructor(host) {
-    this.host = host;
-    this.label = 'AMD Lemonade';
-    this.api = `${host}/api/v1`;
-  }
-
-  num(value) {
-    return typeof value === 'number' && Number.isFinite(value) ? value : null;
-  }
-
-  modelInfo(entry, catalogModel) {
-    const checkpoint = entry.checkpoint || catalogModel?.checkpoint || null;
-    const quantMatch = typeof checkpoint === 'string' ? checkpoint.match(/:([^:]+)$/) : null;
-    const recipeOptions = entry.recipe_options || catalogModel?.recipe_options || {};
-    const sizeGb = this.num(entry.size) ?? this.num(catalogModel?.size);
-    const context = this.num(recipeOptions.ctx_size) ?? this.num(catalogModel?.context_length);
-    return {
-      id: entry.model_name || entry.id || '(unnamed)',
-      size: sizeGb == null ? null : sizeGb * 1024 ** 3,
-      params: entry.parameter_size || catalogModel?.parameter_size || null,
-      quant: quantMatch ? quantMatch[1] : null,
-      device: entry.device || null,
-      recipe: entry.recipe || catalogModel?.recipe || null,
-      context,
-      contextTrain: this.num(catalogModel?.max_context_window),
-      busy: typeof entry.is_busy === 'boolean' ? entry.is_busy : null,
-      streaming: typeof entry.is_streaming === 'boolean' ? entry.is_streaming : null,
-    };
-  }
-
-  async poll() {
-    const [healthRes, modelsRes, statsRes, systemStatsRes] = await Promise.all([
-      fetchText(`${this.api}/health`, 3000, LEMONADE_HEADERS),
-      fetchText(`${this.api}/models`, 3000, LEMONADE_HEADERS),
-      fetchText(`${this.api}/stats`, 3000, LEMONADE_HEADERS),
-      fetchText(`${this.api}/system-stats`, 3000, LEMONADE_HEADERS),
-    ]);
-
-    const result = {
-      ok: [healthRes, modelsRes, statsRes, systemStatsRes].some((r) => r.ok),
-      error: healthRes.error || modelsRes.error || statsRes.error || systemStatsRes.error,
-      models: [],
-    };
-
-    let health = null;
-    if (healthRes.ok) {
-      try {
-        health = JSON.parse(healthRes.text);
-      } catch {}
-    }
-
-    let catalog = [];
-    if (modelsRes.ok) {
-      try {
-        const data = JSON.parse(modelsRes.text);
-        catalog = Array.isArray(data.data)
-          ? data.data.filter((m) => m && typeof m === 'object')
-          : [];
-      } catch {}
-    }
-    const catalogById = new Map(catalog.map((m) => [m.id, m]));
-    result.models = catalog.map((m) => ({ id: m.id, root: m.checkpoint }));
-
-    if (healthRes.ok) {
-      const entries = Array.isArray(health?.all_models_loaded)
-        ? health.all_models_loaded.filter((m) => m && typeof m === 'object')
-        : health?.model_loaded
-          ? [{ model_name: health.model_loaded }]
-          : [];
-      result.loaded = entries.map((m) => this.modelInfo(m, catalogById.get(m.model_name)));
-      result.models = result.loaded.map((m) => ({ id: m.id }));
-      result.busy = result.loaded.some((m) => m.busy === true);
-      result.streaming = result.loaded.some((m) => m.streaming === true);
-    }
-
-    if (statsRes.ok) {
-      try {
-        const stats = JSON.parse(statsRes.text);
-        const requestCountTotal = this.num(stats.request_count_total);
-        const promptTokens = this.num(stats.prompt_tokens) ?? this.num(stats.input_tokens);
-        const genTokens = this.num(stats.output_tokens);
-        const decodeRate = this.num(stats.tokens_per_second);
-        if (requestCountTotal != null) result.requestCountTotal = requestCountTotal;
-        const hasRequest =
-          (requestCountTotal != null && requestCountTotal > 0) ||
-          [promptTokens, genTokens, decodeRate].some((n) => n != null && n > 0);
-        if (hasRequest) {
-          result.lastRequest = {
-            prefillRate: null,
-            decodeRate,
-            promptTokens,
-            genTokens,
-          };
-        }
-        const cachedTokens = this.num(stats.cache_tokens);
-        if (cachedTokens != null && promptTokens != null && promptTokens >= 0) {
-          const totalPromptTokens = cachedTokens + promptTokens;
-          if (totalPromptTokens > 0) {
-            result.cacheHit = {
-              cached: cachedTokens,
-              prompt: totalPromptTokens,
-              pct: (cachedTokens / totalPromptTokens) * 100,
-            };
-          }
-        }
-      } catch {}
-    }
-
-    if (systemStatsRes.ok) {
-      try {
-        const stats = JSON.parse(systemStatsRes.text);
-        result.systemStats = {
-          cpuPercent: this.num(stats.cpu_percent),
-          memoryGb: this.num(stats.memory_gb),
-          gpuPercent: this.num(stats.gpu_percent),
-          vramGb: this.num(stats.vram_gb),
-          npuPercent: this.num(stats.npu_percent),
-        };
-      } catch {}
-    }
-
-    return result;
-  }
-}
-
-// LM Studio's native v1 models endpoint lists downloaded models and exposes
-// each loaded instance's context and other load configuration. The lms model
-// log stream supplies completed-request timing, while the server log stream
-// supplies request-start and request-complete events without the monitor
-// becoming the client that generated the request. Activity is therefore
-// explicitly marked as log-inferred rather than a native server-side counter.
-class LmStudioProvider {
-  constructor(host) {
-    this.host = host;
-    this.label = 'LM Studio';
-    this.api = `${host}/api/v1`;
-    this.lastRequest = null;
-    this.requestCountTotal = 0;
-    this.activeRequests = 0;
-    this.logError = null;
-    this.serverLogError = null;
-    this.stopLogStream = startLmStudioLogStream(
-      (event) => {
-        if (event.kind === 'complete') {
-          this.lastRequest = {
-            prefillRate: null,
-            decodeRate: event.decodeRate,
-            promptTokens: event.promptTokens,
-            genTokens: event.genTokens,
-          };
-          this.requestCountTotal += 1;
-        }
-      },
-      (error) => {
-        this.logError = error?.message || String(error);
-      }
-    );
-    this.stopServerLogStream = startLmStudioServerLogStream(
-      (event) => {
-        if (event.kind === 'start') {
-          this.activeRequests += 1;
-          return;
-        }
-        if (event.kind === 'complete') {
-          this.activeRequests = Math.max(0, this.activeRequests - 1);
-        }
-      },
-      (error) => {
-        this.serverLogError = error?.message || String(error);
-      }
-    );
-    process.once('exit', this.stopLogStream);
-    process.once('exit', this.stopServerLogStream);
-  }
-
-  num(value) {
-    return typeof value === 'number' && Number.isFinite(value) ? value : null;
-  }
-
-  modelInfo(model, instance) {
-    const config = instance.config && typeof instance.config === 'object' ? instance.config : {};
-    const quantization =
-      model.quantization && typeof model.quantization === 'object' ? model.quantization : {};
-    return {
-      id: instance.id || model.key || model.display_name || '(unnamed)',
-      size: this.num(model.size_bytes),
-      params: typeof model.params_string === 'string' ? model.params_string : null,
-      quant: typeof quantization.name === 'string' ? quantization.name : null,
-      format: typeof model.format === 'string' ? model.format : null,
-      context: this.num(config.context_length),
-      contextTrain: this.num(model.max_context_length),
-    };
-  }
-
-  async poll() {
-    const modelsRes = await fetchText(`${this.api}/models`, 3000, LMSTUDIO_HEADERS);
-    const result = {
-      ok: modelsRes.ok,
-      error: modelsRes.error,
-      models: [],
-      loaded: [],
-      lastRequest: this.lastRequest,
-      requestCountTotal: this.requestCountTotal,
-      busy: this.serverLogError ? null : this.activeRequests > 0,
-      activitySource: this.serverLogError ? 'server log unavailable' : 'server log inferred',
-    };
-    if (!modelsRes.ok) return result;
-
-    let data;
-    try {
-      data = JSON.parse(modelsRes.text);
-    } catch {
-      return { ...result, ok: false, error: 'bad JSON from /api/v1/models' };
-    }
-
-    const catalog = Array.isArray(data?.models)
-      ? data.models.filter((m) => m && typeof m === 'object')
-      : Array.isArray(data?.data)
-        ? data.data.filter((m) => m && typeof m === 'object')
-        : [];
-    const llms = catalog.filter((m) => m.type == null || m.type === 'llm');
-    result.models = llms.map((m) => ({ id: m.key || m.display_name || '(unnamed)', root: m.display_name }));
-
-    for (const model of llms) {
-      const instances = Array.isArray(model.loaded_instances)
-        ? model.loaded_instances.filter((instance) => instance && typeof instance === 'object')
-        : [];
-      for (const instance of instances) result.loaded.push(this.modelInfo(model, instance));
-    }
-
-    result.lastRequest = this.lastRequest;
-    result.requestCountTotal = this.requestCountTotal;
-    result.busy = this.serverLogError ? null : this.activeRequests > 0;
-    result.activitySource = this.serverLogError ? 'server log unavailable' : 'server log inferred';
-    if (!result.lastRequest) {
-      result.telemetryUnavailable = this.logError
-        ? `lms log stream unavailable; ${this.logError}`
-        : 'waiting for a completed request from lms log stream';
-    }
-    return result;
-  }
-}
 
 // ---- platform factory -------------------------------------------------
 // Registry of supported platforms. Add new entries here as providers are
@@ -951,6 +146,7 @@ const PLATFORMS = [
   { key: 'llamacpp', label: 'llama.cpp', host: LLAMACPP_HOST, create: (host) => new LlamaCppProvider(host) },
   { key: 'lmstudio', label: 'LM Studio', host: LMSTUDIO_HOST, create: (host) => new LmStudioProvider(host) },
   { key: 'lemonade', label: 'AMD Lemonade', host: LEMONADE_HOST, create: (host) => new LemonadeProvider(host) },
+  { key: 'openclaw', label: 'OpenClaw', host: OPENCLAW_HOST, create: (host) => new OpenClawProvider(host) },
 ];
 
 function createProvider(key) {
@@ -998,6 +194,57 @@ function collect(provider) {
   return Promise.all([nvidiaSmi(), provider.poll()]);
 }
 
+function openclawSnapshot(oc) {
+  const L = [];
+  const loop = oc.eventLoop;
+  L.push(
+    `  state ${oc.ready ? 'ready' : 'not ready'}  uptime ${duration(oc.uptimeMs)}` +
+      (loop ? `  event loop p99 ${loop.delayP99Ms ?? '—'} ms  util ${pct(loop.utilization != null ? loop.utilization * 100 : null)}` : '')
+  );
+  if (oc.failing.length) L.push(`  failing  ${oc.failing.join(', ')}`);
+  if (loop?.degraded) L.push(`  event loop degraded${loop.reasons.length ? ` (${loop.reasons.join(', ')})` : ''}`);
+  const s = oc.status;
+  if (s) {
+    L.push(
+      `  version ${s.version ?? '—'}  pid ${s.pid ?? '—'}  RSS ${gb(s.rssBytes)}` +
+        (s.connectLatencyMs != null ? `  connect ${s.connectLatencyMs} ms` : '')
+    );
+    L.push(
+      `  tasks ${s.tasks.active ?? '—'} active (${s.tasks.queued ?? '—'} queued, ${s.tasks.running ?? '—'} running, ${s.tasks.failed ?? '—'} failed)` +
+        `  sessions ${s.sessions ?? '—'}  channels ${s.channels ?? '—'}`
+    );
+    const degraded = [
+      s.modelRuntimeDegraded ? 'model runtime' : null,
+      s.degradedPlugins ? `${s.degradedPlugins} plugin(s)` : null,
+    ].filter(Boolean);
+    if (degraded.length) L.push(`  degraded  ${degraded.join(', ')}`);
+  }
+  if (oc.statusError) L.push(`  status unavailable (${oc.statusError})`);
+  else if (!s) L.push('  status waiting for openclaw status --json');
+  const q = oc.requests;
+  if (q) {
+    L.push(
+      `  request state  busy ${q.busy ? 'yes' : 'no'}` +
+        (q.busy ? ` (${q.running} running, ${duration(q.activeElapsedMs)} elapsed)` : '') +
+        '  (sessions.list)'
+    );
+    L.push(`  requests completed  ${q.completed} since monitor start`);
+    const r = q.lastRequest;
+    if (r) {
+      L.push(
+        `  last request  ${r.model ?? '—'}  ${r.runtimeMs != null ? `${(r.runtimeMs / 1000).toFixed(1)}s` : '—'}` +
+          `  input ${r.promptTokens ?? '—'} tok  output ${r.genTokens ?? '—'} tok` +
+          `  ~${rate(r.decodeRate)} end-to-end  ${r.outcome ?? '—'}`
+      );
+    } else {
+      L.push('  last request  no completed request in sessions');
+    }
+  }
+  if (oc.requestsError) L.push(`  requests unavailable (${oc.requestsError})`);
+  else if (!q) L.push('  requests waiting for sessions.list');
+  return L;
+}
+
 async function snapshot(provider, sampled) {
   const [gpus, v] = sampled || (await collect(provider));
   const L = [];
@@ -1035,6 +282,8 @@ async function snapshot(provider, sampled) {
   L.push(`${provider.label} (${provider.host})`);
   if (!v.ok) {
     L.push(`  server not reachable (${v.error})`);
+  } else if (v.gateway) {
+    L.push(...openclawSnapshot(v.gateway));
   } else {
     if (v.loaded) {
       // Ollama- or llama.cpp-shaped result: one or more resident models, with
@@ -1255,6 +504,7 @@ function renderFrame() {
       gb,
       pct,
       rate,
+      duration,
       interval: INTERVAL,
       keepAwake: {
         on: isKeepAwakeActive(),
@@ -1303,7 +553,11 @@ const provider = createProvider(await selectPlatform());
 if (ONCE) {
   // For a meaningful throughput reading we need two samples.
   await snapshot(provider);
-  await new Promise((r) => setTimeout(r, Math.min(INTERVAL, 1500)));
+  await Promise.all([
+    new Promise((r) => setTimeout(r, Math.min(INTERVAL, 1500))),
+    provider.statusPending,
+    provider.sessionsPending,
+  ]);
   process.stdout.write((await snapshot(provider)) + '\n');
   process.exit(0);
 }

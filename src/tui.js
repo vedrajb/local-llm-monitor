@@ -129,6 +129,101 @@ function footerLines(ka, lid) {
   return ['', fit(`  ${parts.join(`${MUTE}  ·  ${RESET}`)}`, termWidth()), ''];
 }
 
+function openclawBoxes(oc, opts, history) {
+  const { gb, pct, rate, duration } = opts;
+  const lines = [];
+  const agents = [];
+  const loop = oc.eventLoop;
+  lines.push(
+    `${col('state', 10)}${oc.ready ? `${OK}ready${RESET}` : `${WARN}not ready${RESET}`}` +
+      `   ${MUTE}uptime${RESET} ${BOLD}${duration(oc.uptimeMs)}${RESET}`
+  );
+  if (loop) {
+    const util = loop.utilization != null ? loop.utilization * 100 : null;
+    lines.push(
+      `${col('loop', 10)}${MUTE}p99${RESET} ${BOLD}${loop.delayP99Ms ?? '—'} ms${RESET}   ` +
+        `${MUTE}util${RESET} ${sevColor(util)}${pct(util)}${RESET}` +
+        (loop.degraded
+          ? `   ${WARN}degraded${RESET}${loop.reasons.length ? ` ${MUTE}(${loop.reasons.join(', ')})${RESET}` : ''}`
+          : '')
+    );
+  }
+  if (oc.failing.length) lines.push(`${col('failing', 10)}${BAD}${oc.failing.join(', ')}${RESET}`);
+  const s = oc.status;
+  if (s) {
+    lines.push(
+      `${col('process', 10)}${MUTE}v${RESET}${s.version ?? '—'}   ${MUTE}pid${RESET} ${s.pid ?? '—'}   ` +
+        `${MUTE}RSS${RESET} ${BOLD}${gb(s.rssBytes)}${RESET}` +
+        (s.connectLatencyMs != null ? `   ${MUTE}connect${RESET} ${s.connectLatencyMs} ms` : '')
+    );
+    agents.push(
+      `${col('tasks', 10)}${BOLD}${s.tasks.active ?? '—'}${RESET} ${MUTE}active${RESET}   ` +
+        `${MUTE}queued${RESET} ${BOLD}${s.tasks.queued ?? '—'}${RESET}   ` +
+        `${MUTE}running${RESET} ${BOLD}${s.tasks.running ?? '—'}${RESET}   ` +
+        `${MUTE}failed${RESET} ${s.tasks.failed ? BAD : BOLD}${s.tasks.failed ?? '—'}${RESET}`
+    );
+    agents.push(
+      `${col('sessions', 10)}${BOLD}${s.sessions ?? '—'}${RESET}   ` +
+        `${MUTE}channels${RESET} ${BOLD}${s.channels ?? '—'}${RESET}`
+    );
+    const degraded = [
+      s.modelRuntimeDegraded ? 'model runtime' : null,
+      s.degradedPlugins ? `${s.degradedPlugins} plugin(s)` : null,
+    ].filter(Boolean);
+    if (degraded.length) agents.push(`${col('degraded', 10)}${WARN}${degraded.join(', ')}${RESET}`);
+  }
+  if (oc.statusError) {
+    agents.push(`${WARN}status unavailable${RESET} ${MUTE}(${oc.statusError})${RESET}`);
+  } else if (!s) {
+    agents.push(`${MUTE}waiting for openclaw status --json${RESET}`);
+  }
+  const requests = [];
+  const q = oc.requests;
+  if (q) {
+    requests.push(
+      `${col('state', 10)}${MUTE}busy${RESET} ${BOLD}${q.busy ? 'yes' : 'no'}${RESET}` +
+        (q.busy
+          ? `   ${MUTE}running${RESET} ${BOLD}${q.running}${RESET}   ${MUTE}elapsed${RESET} ${BOLD}${duration(q.activeElapsedMs)}${RESET}`
+          : '') +
+        `   ${MUTE}(sessions.list)${RESET}`
+    );
+    requests.push(`${col('completed', 10)}${BOLD}${q.completed}${RESET} ${MUTE}requests since monitor start${RESET}`);
+    const r = q.lastRequest;
+    if (r) {
+      requests.push(
+        `${col('last', 10)}${BOLD}${r.model ?? '—'}${RESET}   ` +
+          `${MUTE}time${RESET} ${BOLD}${r.runtimeMs != null ? `${(r.runtimeMs / 1000).toFixed(1)}s` : '—'}${RESET}   ` +
+          `${MUTE}outcome${RESET} ${r.outcome === 'done' ? OK : WARN}${r.outcome ?? '—'}${RESET}`
+      );
+      requests.push(
+        `${col('tokens', 10)}${MUTE}input${RESET} ${BOLD}${r.promptTokens ?? '—'}${RESET}   ` +
+          `${MUTE}output${RESET} ${BOLD}${r.genTokens ?? '—'}${RESET}   ` +
+          `${MUTE}rate${RESET} ${BOLD}~${rate(r.decodeRate)}${RESET} ${MUTE}end-to-end${RESET}`
+      );
+      if (history?.requestDecodeRate && history.requestDecodeRate.length > 0) {
+        const trendPrefix = `${col('trend', 10)}`;
+        const trendSuffix = ` ${MUTE}(per request)${RESET}`;
+        requests.push(
+          `${trendPrefix}${ACC}${spark(history.requestDecodeRate, undefined, sparkWidth(trendPrefix, trendSuffix))}${RESET}${trendSuffix}`
+        );
+      }
+    } else {
+      requests.push(`${MUTE}no completed request in sessions${RESET}`);
+    }
+  }
+  if (oc.requestsError) {
+    requests.push(`${WARN}requests unavailable${RESET} ${MUTE}(${oc.requestsError})${RESET}`);
+  } else if (!q) {
+    requests.push(`${MUTE}waiting for sessions.list${RESET}`);
+  }
+  const accent = !oc.ready || loop?.degraded || oc.failing.length ? WARN : ACC;
+  return [
+    ...box('Gateway', lines, accent),
+    ...box('Requests', requests, WARN),
+    ...box('Agents', agents, OK),
+  ];
+}
+
 export function renderTui(provider, gpus, v, history, opts = {}) {
   const { gb, pct, rate, interval } = opts;
   const systemGb = (n) => (n == null || Number.isNaN(n) ? '—' : `${n.toFixed(1)} GB`);
@@ -189,6 +284,12 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
   // ---- server ----
   if (!v.ok) {
     L.push(...box(provider.label, [`${BAD}server not reachable${RESET} ${MUTE}(${v.error})${RESET}`], BAD));
+    L.push(...footerLines(opts.keepAwake, opts.lidAction));
+    return L.join('\n');
+  }
+
+  if (v.gateway) {
+    L.push(...openclawBoxes(v.gateway, opts, history));
     L.push(...footerLines(opts.keepAwake, opts.lidAction));
     return L.join('\n');
   }

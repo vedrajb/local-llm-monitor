@@ -119,3 +119,21 @@ for line in sys.stdin:
         if t: print(t, end="", flush=True)
 '
 ```
+
+## openclaw
+
+__URL__: http://127.0.0.1:18789
+
+This sends the prompt as an agent turn through the running OpenClaw gateway,
+using whichever model the agent is configured with. It uses a dedicated session
+so the load test does not mix with your normal conversations, and it does not
+deliver the reply to any chat channel.
+
+Start `npm run openclaw` in another terminal to watch the gateway while the
+request runs.
+
+```bash
+openclaw agent --session-id load-test --thinking off --timeout 900 --message "explain stormlight archive in 10000 words."
+```
+
+Add `--json` to print the result as JSON instead of plain text.
