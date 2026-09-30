@@ -76,10 +76,11 @@ server: [ollama-setup-windows.md](ollama-setup-windows.md),
 
 Agent-style tool use needs a model with reliable tool calling and a large
 context window. Ollama's default context is often 4k and truncates agent
-prompts, so raise it. Hermes refuses to start with a model whose context window
-is below 64,000 tokens, so set `OLLAMA_CONTEXT_LENGTH=65536` before starting the
-Ollama server and confirm it with `ollama ps`. A larger context needs more VRAM
-for the KV cache.
+prompts, so raise it. This repository's `start-ollama.bat` sets
+`OLLAMA_CONTEXT_LENGTH=32768`; confirm it with `ollama ps`. Hermes refuses to
+start with a model whose context window is below 64,000 tokens, so at 32768 a
+local Ollama model is rejected and Hermes should use a hosted provider instead.
+Raising the context to 64k or more needs more VRAM for the KV cache.
 
 ## 5. Run
 
