@@ -43,6 +43,9 @@ export const OPENCLAW_HOST = opt('--openclaw-host', process.env.OPENCLAW_HOST ||
 export const HERMES_HOST = opt('--hermes-host', process.env.HERMES_HOST || 'http://127.0.0.1:8642')
   .replace(/^(?!https?:\/\/)/i, 'http://')
   .replace(/\/$/, '');
+export const COMFYUI_HOST = opt('--comfyui-host', process.env.COMFYUI_HOST || 'http://127.0.0.1:8188')
+  .replace(/^(?!https?:\/\/)/i, 'http://')
+  .replace(/\/$/, '');
 export function readHermesEnvKey(envPath) {
   try {
     const m = readFileSync(envPath, 'utf8').match(/^API_SERVER_KEY=(.*)$/m);

@@ -292,6 +292,70 @@ function hermesBoxes(h, opts) {
   return out;
 }
 
+function comfyuiBoxes(c, opts) {
+  const { gb, duration } = opts;
+  const used = (total, free) => (total != null && free != null ? total - free : null);
+  const secs = (ms) => (ms != null ? `${(ms / 1000).toFixed(1)}s` : '\u2014');
+  const s = c.system;
+  const lines = [];
+  lines.push(
+    `${col('version', 10)}${BOLD}${s.version ?? '\u2014'}${RESET}   ${MUTE}python${RESET} ${s.python ?? '\u2014'}   ` +
+      `${MUTE}pytorch${RESET} ${s.pytorch ?? '\u2014'}`
+  );
+  const ramUsed = used(s.ramTotal, s.ramFree);
+  const ramPct = ramUsed != null && s.ramTotal ? (ramUsed / s.ramTotal) * 100 : null;
+  lines.push(
+    `${col('RAM', 10)}${gauge(ramPct / 100, 22, sevColor(ramPct))} ${BOLD}${gb(ramUsed)}${RESET}${MUTE}/${gb(s.ramTotal)}${RESET}`
+  );
+  for (const d of c.devices) {
+    const vramUsed = used(d.vramTotal, d.vramFree);
+    const vramPct = vramUsed != null && d.vramTotal ? (vramUsed / d.vramTotal) * 100 : null;
+    lines.push(`${col('device', 10)}${BOLD}${d.name ?? '\u2014'}${RESET} ${MUTE}(${d.type ?? '\u2014'})${RESET}`);
+    lines.push(
+      `${col('VRAM', 10)}${gauge(vramPct / 100, 22, sevColor(vramPct))} ${BOLD}${gb(vramUsed)}${RESET}${MUTE}/${gb(d.vramTotal)}${RESET}` +
+        `   ${MUTE}torch${RESET} ${gb(used(d.torchVramTotal, d.torchVramFree))}${MUTE}/${gb(d.torchVramTotal)}${RESET}`
+    );
+  }
+  const jobs = [];
+  const q = c.queue;
+  if (q) {
+    jobs.push(
+      `${col('queue', 10)}${MUTE}running${RESET} ${BOLD}${q.running}${RESET}   ${MUTE}pending${RESET} ${BOLD}${q.pending}${RESET}` +
+        (q.busy && q.activeElapsedMs != null ? `   ${MUTE}elapsed${RESET} ${BOLD}${duration(q.activeElapsedMs)}${RESET}` : '')
+    );
+  }
+  if (c.queueError) jobs.push(`${WARN}queue unavailable${RESET} ${MUTE}(${c.queueError})${RESET}`);
+  const j = c.jobs;
+  if (j) {
+    jobs.push(
+      `${col('completed', 10)}${BOLD}${j.completed}${RESET} ${MUTE}since monitor start${RESET}   ` +
+        `${MUTE}errors${RESET} ${j.errors ? BAD : BOLD}${j.errors}${RESET}   ` +
+        `${MUTE}interrupted${RESET} ${j.interrupted ? WARN : BOLD}${j.interrupted}${RESET}`
+    );
+    const r = j.last;
+    if (r) {
+      const color = r.status === 'success' ? OK : r.status === 'error' ? BAD : WARN;
+      jobs.push(
+        `${col('last', 10)}${color}${r.status ?? '\u2014'}${RESET}   ${MUTE}time${RESET} ${BOLD}${secs(r.durationMs)}${RESET}   ` +
+          `${MUTE}cached${RESET} ${BOLD}${r.cachedNodes}/${r.totalNodes ?? '\u2014'}${RESET} ${MUTE}nodes${RESET}   ` +
+          `${MUTE}images${RESET} ${BOLD}${r.outputImages}${RESET}`
+      );
+      if (r.error) {
+        jobs.push(`${col('error', 10)}${BAD}${r.error.nodeType ?? '\u2014'}${RESET} ${MUTE}${r.error.message ?? ''}${RESET}`);
+      }
+    } else {
+      jobs.push(`${MUTE}no job in history${RESET}`);
+    }
+    jobs.push(
+      `${col('avg', 10)}${BOLD}${secs(j.avgDurationMs)}${RESET} ${MUTE}(last ${j.window} in history)${RESET}`
+    );
+  }
+  if (c.historyError) jobs.push(`${WARN}history unavailable${RESET} ${MUTE}(${c.historyError})${RESET}`);
+  const out = [...box('ComfyUI', lines, ACC)];
+  if (jobs.length) out.push(...box('Jobs', jobs, q?.busy ? WARN : OK));
+  return out;
+}
+
 export function renderTui(provider, gpus, v, history, opts = {}) {
   const { gb, pct, rate, interval } = opts;
   const systemGb = (n) => (n == null || Number.isNaN(n) ? '—' : `${n.toFixed(1)} GB`);
@@ -352,6 +416,12 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
   // ---- server ----
   if (!v.ok) {
     L.push(...box(provider.label, [`${BAD}server not reachable${RESET} ${MUTE}(${v.error})${RESET}`], BAD));
+    L.push(...footerLines(opts.keepAwake, opts.lidAction));
+    return L.join('\n');
+  }
+
+  if (v.gateway?.kind === 'comfyui') {
+    L.push(...comfyuiBoxes(v.gateway, opts));
     L.push(...footerLines(opts.keepAwake, opts.lidAction));
     return L.join('\n');
   }

@@ -227,6 +227,49 @@ model, run a second monitor on the model server (for example
   or `API_SERVER_KEY`, and otherwise read from `API_SERVER_KEY` in Hermes's own
   `.env`. Without a key only liveness and the `state.db` stats are shown.
 
+## ComfyUI
+
+ComfyUI generates images, not text, so **there are no token counts and no
+prefill or decode rate for ComfyUI**. The monitor polls three REST endpoints
+(default host `http://127.0.0.1:8188`) every interval, with a 3 s timeout each.
+It does not use the `/ws` WebSocket, so it shows no per-step progress.
+
+ComfyUI tokenizes prompt text inside its text-encoder nodes (CLIP or T5) but
+never exposes the count, and its output is images rather than tokens, so no
+endpoint reports input or output tokens. Estimating them from the prompt text
+would need a model-specific tokenizer, which this zero-dependency monitor does
+not ship. If a workflow calls an LLM through a custom node (for example an
+Ollama or llama.cpp node), run a second monitor against that model server to
+see its per-request tokens.
+
+- **Liveness and memory** come from `GET /system_stats`, which decides
+  reachable vs not. It gives the ComfyUI, Python and PyTorch versions, host RAM
+  used (`ram_total - ram_free`) and, per device, VRAM used of total and
+  PyTorch's own reserved pool (`torch_vram_total - torch_vram_free`). On AMD
+  or Intel GPUs, where `nvidia-smi` is unavailable, this is the only VRAM
+  figure.
+- **Queue** comes from `GET /queue`: the number of running and pending prompts.
+  ComfyUI does not report when the running prompt started, so its elapsed time
+  is measured from the first poll that saw it and is approximate.
+- **Jobs** come from `GET /history?max_items=20`, sorted by queue number:
+  - **Outcome** is `success`, `error` or `interrupted`, from
+    `status.status_str` and the `execution_error` / `execution_interrupted`
+    messages. An error also shows the failing node type and exception message.
+  - **Duration** runs from the `execution_start` timestamp to the final
+    `execution_success`, `execution_error` or `execution_interrupted`
+    timestamp. Builds that do not record those timestamps show `—`.
+  - **Cached nodes** is the number of nodes ComfyUI skipped because their
+    outputs were cached, out of the nodes in the submitted graph.
+  - **Images** is the number of images across the job's outputs.
+  - **Average duration** covers the jobs in that history window.
+- **Jobs completed, errors and interrupted** count jobs that finished after the
+  monitor started, once each by prompt ID. Jobs already in the history at
+  startup are not counted. On builds that record no timestamps, a job counts
+  if it was not in the history on the monitor's first poll.
+- If `/queue` or `/history` fails, the monitor keeps showing the server as
+  reachable and says which part is unavailable. Older builds that ignore
+  `max_items` return the full history, which can be slow on a long session.
+
 ## Unavailable values
 
 Any field a platform cannot supply is `null` and renders as `—`. That is

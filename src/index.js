@@ -29,7 +29,7 @@
 //                           [--lmstudio-api-key KEY] [--lemonade-host URL]
 //                           [--lemonade-api-key KEY] [--ollama-log PATH]
 //                           [--openclaw-host URL] [--hermes-host URL]
-//                           [--hermes-api-key KEY]
+//                           [--hermes-api-key KEY] [--comfyui-host URL]
 //                           [--interval MS] [--once] [--no-keep-awake]
 
 import { spawn } from 'node:child_process';
@@ -51,6 +51,7 @@ import { LemonadeProvider } from './providers/lemonade.js';
 import { LmStudioProvider } from './providers/lmstudio.js';
 import { OpenClawProvider } from './providers/openclaw.js';
 import { HermesProvider } from './providers/hermes.js';
+import { ComfyUIProvider } from './providers/comfyui.js';
 import {
   VLLM_HOST,
   OLLAMA_HOST,
@@ -61,6 +62,7 @@ import {
   HERMES_HOST,
   HERMES_HEADERS,
   HERMES_DB,
+  COMFYUI_HOST,
   INTERVAL,
   ONCE,
   PLAIN,
@@ -153,6 +155,7 @@ const PLATFORMS = [
   { key: 'lemonade', label: 'AMD Lemonade', host: LEMONADE_HOST, create: (host) => new LemonadeProvider(host) },
   { key: 'openclaw', label: 'OpenClaw', host: OPENCLAW_HOST, create: (host) => new OpenClawProvider(host) },
   { key: 'hermes', label: 'Hermes Agent', host: HERMES_HOST, create: (host) => new HermesProvider(host, HERMES_HEADERS, HERMES_DB) },
+  { key: 'comfyui', label: 'ComfyUI', host: COMFYUI_HOST, create: (host) => new ComfyUIProvider(host) },
 ];
 
 function createProvider(key) {
@@ -295,6 +298,49 @@ function hermesSnapshot(h) {
   return L;
 }
 
+function comfyuiSnapshot(c) {
+  const L = [];
+  const s = c.system;
+  L.push(
+    `  version ${s.version ?? '—'}  python ${s.python ?? '—'}  pytorch ${s.pytorch ?? '—'}` +
+      `  RAM ${gb(s.ramTotal != null && s.ramFree != null ? s.ramTotal - s.ramFree : null)}/${gb(s.ramTotal)}`
+  );
+  for (const d of c.devices) {
+    L.push(
+      `  device ${d.index ?? '—'} ${d.name ?? '—'} (${d.type ?? '—'})` +
+        `  VRAM ${gb(d.vramTotal != null && d.vramFree != null ? d.vramTotal - d.vramFree : null)}/${gb(d.vramTotal)}` +
+        `  torch ${gb(d.torchVramTotal != null && d.torchVramFree != null ? d.torchVramTotal - d.torchVramFree : null)}/${gb(d.torchVramTotal)}`
+    );
+  }
+  const q = c.queue;
+  if (q) {
+    L.push(
+      `  queue  running ${q.running}  pending ${q.pending}` +
+        (q.busy && q.activeElapsedMs != null ? `  (${duration(q.activeElapsedMs)} elapsed)` : '')
+    );
+  }
+  if (c.queueError) L.push(`  queue unavailable (${c.queueError})`);
+  const j = c.jobs;
+  if (j) {
+    L.push(`  jobs completed  ${j.completed} since monitor start  errors ${j.errors}  interrupted ${j.interrupted}`);
+    const r = j.last;
+    if (r) {
+      L.push(
+        `  last job  ${r.status ?? '—'}  ${r.durationMs != null ? `${(r.durationMs / 1000).toFixed(1)}s` : '—'}` +
+          `  cached ${r.cachedNodes}/${r.totalNodes ?? '—'} nodes  images ${r.outputImages}`
+      );
+      if (r.error) L.push(`  last error  ${r.error.nodeType ?? '—'}: ${r.error.message ?? '—'}`);
+    } else {
+      L.push('  last job  no job in history');
+    }
+    L.push(
+      `  avg duration  ${j.avgDurationMs != null ? `${(j.avgDurationMs / 1000).toFixed(1)}s` : '—'}  (last ${j.window} in history)`
+    );
+  }
+  if (c.historyError) L.push(`  history unavailable (${c.historyError})`);
+  return L;
+}
+
 async function snapshot(provider, sampled) {
   const [gpus, v] = sampled || (await collect(provider));
   const L = [];
@@ -332,6 +378,8 @@ async function snapshot(provider, sampled) {
   L.push(`${provider.label} (${provider.host})`);
   if (!v.ok) {
     L.push(`  server not reachable (${v.error})`);
+  } else if (v.gateway?.kind === 'comfyui') {
+    L.push(...comfyuiSnapshot(v.gateway));
   } else if (v.gateway) {
     L.push(...(v.gateway.kind === 'hermes' ? hermesSnapshot(v.gateway) : openclawSnapshot(v.gateway)));
   } else {

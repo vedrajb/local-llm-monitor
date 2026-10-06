@@ -15,6 +15,7 @@ The hosting platform is chosen at startup through a pluggable provider
 - **AMD Lemonade**
 - **OpenClaw**
 - **Hermes Agent**
+- **ComfyUI**
 
 It reads:
 
@@ -64,6 +65,13 @@ It reads:
   and per-turn duration, tokens, API calls, tool calls and outcome for every
   surface including `hermes chat`. Hermes is an agent in front of a model, so
   it has no prefill/decode rate; monitor the model server for that.
+- **ComfyUI** (via `/system_stats`, `/queue` and `/history`) — versions, host
+  RAM, per-device VRAM and PyTorch VRAM, running and pending prompts, jobs
+  completed since monitor start with errors and interruptions, and the last
+  job's outcome, duration, cached nodes, image count and error. ComfyUI
+  generates images and does not expose prompt token counts, so it has no
+  per-request input/output tokens or prefill/decode rate; for LLM custom nodes,
+  monitor the model server they call.
 
 ## Documentation
 
@@ -84,6 +92,8 @@ It reads:
   setup on native Windows, including local model servers and Tailscale exposure.
 - **[hermes-setup-windows.md](docs/hermes-setup-windows.md)** — Hermes Agent setup on
   native Windows, local model servers, and enabling the API server for monitoring.
+- **[comfyui-setup-windows.md](docs/comfyui-setup-windows.md)** — ComfyUI setup on
+  Windows and making its API reachable by the monitor.
 
 ### Generating load
 
@@ -107,6 +117,7 @@ npm run vllm               # live TUI, skip the platform prompt
 npm run llamacpp           # live TUI, skip the platform prompt
 npm run lmstudio           # live TUI, skip the platform prompt
 npm run lemonade           # live TUI, skip the platform prompt
+npm run comfyui            # live TUI, skip the platform prompt
 npm run plain              # live plain text instead of the TUI
 npm run once               # two samples ~1.5s apart, prints, exits
 npm run once:ollama        # single snapshot of a specific platform
@@ -114,6 +125,7 @@ npm run once:vllm
 npm run once:llamacpp
 npm run once:lmstudio
 npm run once:lemonade
+npm run once:comfyui
 npm test                   # run the Node test suite
 ```
 
@@ -149,6 +161,7 @@ node src/index.js --once             # takes two samples ~1.5s apart, prints, ex
 node src/index.js --platform ollama  # skip the platform prompt
 node src/index.js --platform lmstudio # monitor LM Studio on :1234
 node src/index.js --platform lemonade # monitor Lemonade on :13305
+node src/index.js --platform comfyui  # monitor ComfyUI on :8188
 ```
 
 The live view is a **TUI** (boxes, gauges, sparklines). It automatically falls
@@ -193,7 +206,7 @@ the lid-close segment rather than offering a control that does nothing.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--platform KEY` | prompt / first | Platform to monitor: `vllm`, `ollama`, `llamacpp`, `lmstudio`, `lemonade`, `openclaw` or `hermes` (also `LLM_PLATFORM` env) |
+| `--platform KEY` | prompt / first | Platform to monitor: `vllm`, `ollama`, `llamacpp`, `lmstudio`, `lemonade`, `openclaw`, `hermes` or `comfyui` (also `LLM_PLATFORM` env) |
 | `--vllm-host URL` | `http://localhost:8000` | vLLM base URL (also `VLLM_HOST` env) |
 | `--ollama-host URL` | `http://localhost:11434` | Ollama base URL (also `OLLAMA_HOST` env; a missing `http://` is added) |
 | `--ollama-log PATH` | platform default | Ollama `server.log` to read throughput from (also `OLLAMA_LOG` env) |
@@ -206,6 +219,7 @@ the lid-close segment rather than offering a control that does nothing.
 | `--hermes-host URL` | `http://127.0.0.1:8642` | Hermes Agent API server base URL; polls `/health` and `/health/detailed` every interval, with `/api/sessions` as the fallback when `state.db` cannot be read (also `HERMES_HOST` env; a missing `http://` is added) |
 | `--hermes-api-key KEY` | — | Hermes `API_SERVER_KEY` bearer token, needed for `/health/detailed` and sessions (also `HERMES_API_KEY` or `API_SERVER_KEY` env; if unset, read from `API_SERVER_KEY` in Hermes's own `.env`) |
 | `--hermes-db PATH` | `%LOCALAPPDATA%\hermes\state.db` (`~/.hermes/state.db` elsewhere) | Hermes session database, opened read-only for per-turn duration, tokens, API and tool calls, including `hermes chat` turns; falls back to `/api/sessions` if unreadable (also `HERMES_DB` env) |
+| `--comfyui-host URL` | `http://127.0.0.1:8188` | ComfyUI base URL; polls `/system_stats`, `/queue` and `/history` every interval (also `COMFYUI_HOST` env; a missing `http://` is added) |
 | `--interval MS` | `2000` | Refresh / sampling interval |
 | `--plain` | — | Plain text instead of the TUI (also automatic when piped / `NO_COLOR`) |
 | `--once` | — | Print a single snapshot and exit |

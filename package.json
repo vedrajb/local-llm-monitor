@@ -15,6 +15,7 @@
     "lemonade": "node src/index.js --platform lemonade",
     "openclaw": "node src/index.js --platform openclaw",
     "hermes": "node src/index.js --platform hermes",
+    "comfyui": "node src/index.js --platform comfyui",
     "plain": "node src/index.js --plain",
     "test": "node --test test/*.test.js",
     "once": "node src/index.js --once",
@@ -24,7 +25,8 @@
     "once:lmstudio": "node src/index.js --platform lmstudio --once",
     "once:lemonade": "node src/index.js --platform lemonade --once",
     "once:hermes": "node src/index.js --platform hermes --once",
-    "once:openclaw": "node src/index.js --platform openclaw --once"
+    "once:openclaw": "node src/index.js --platform openclaw --once",
+    "once:comfyui": "node src/index.js --platform comfyui --once"
   },
   "engines": {
     "node": ">=18"
