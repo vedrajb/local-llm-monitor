@@ -26,7 +26,10 @@
     "once:lemonade": "node src/index.js --platform lemonade --once",
     "once:hermes": "node src/index.js --platform hermes --once",
     "once:openclaw": "node src/index.js --platform openclaw --once",
-    "once:comfyui": "node src/index.js --platform comfyui --once"
+    "once:comfyui": "node src/index.js --platform comfyui --once",
+    "llamacpp:serve": "node scripts/llamacpp-serve.mjs",
+    "llamacpp:serve:nometrics": "node scripts/llamacpp-serve.mjs --no-metrics",
+    "llamacpp:test": "node scripts/llamacpp-serve.mjs --with-monitor"
   },
   "engines": {
     "node": ">=18"
