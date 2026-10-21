@@ -40,6 +40,118 @@ export class LlamaCppProvider {
     this.label = 'llama.cpp';
     // Previous /slots sample, for differencing n_decoded into a live rate.
     this.prev = null; // { t, slots: Map(slotId -> { task, decoded }) }
+    this.reqTrack = { baselined: false, slots: new Map(), count: 0, last: null };
+  }
+
+  // Reconstruct per-request stats from /slots, tracked per slot and keyed on
+  // id_task: llama.cpp only commits timings at request end and /metrics may be
+  // off, so we watch each task while it runs and finalize when it stops.
+  // Baseline rule: tasks already idle or running on the first poll are
+  // pre-existing, not new requests, so they are recorded but not counted.
+  // Known limits: n_prompt_tokens may include cached tokens, and multiple
+  // requests on the same slot within one poll interval collapse to the latest.
+  // Slots absent from a sample are dropped uncounted. If /slots failed for longer
+  // than MAX_GAP_MS, runtime ends at the last sample seen, not at "now".
+  trackRequests(slots, now, model) {
+    const rt = this.reqTrack;
+    const MAX_GAP_MS = 10000; // several default poll intervals
+    const finite = (v) => {
+      if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+      if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
+      return null;
+    };
+    const finish = (tr, decoded, nPrompt) => {
+      tr.finished = true;
+      if (tr.baseline) return;
+      // An idle slot may hold a stale or reset count, so only trust it if it
+      // has not gone backwards.
+      const genTokens = decoded != null && (tr.lastDecoded == null || decoded >= tr.lastDecoded) ? decoded : tr.lastDecoded;
+      let decodeRate = null;
+      if (tr.firstDecodedAt != null && tr.firstDecoded != null && tr.lastDecoded != null) {
+        const dt = (tr.lastDecodedAt - tr.firstDecodedAt) / 1000;
+        const delta = tr.lastDecoded - tr.firstDecoded;
+        // A zero window or no observed decode progress gives no honest rate, so null.
+        if (dt > 0 && delta > 0) decodeRate = delta / dt;
+      }
+      let runtimeMs = null;
+      if (tr.firstSeen != null) {
+        const end = tr.lastSeen != null && now - tr.lastSeen > MAX_GAP_MS ? tr.lastSeen : now;
+        runtimeMs = end - tr.firstSeen;
+      }
+      rt.count += 1;
+      rt.last = {
+        model: tr.model ?? model ?? null,
+        runtimeMs,
+        promptTokens: nPrompt ?? tr.nPrompt ?? null,
+        genTokens: genTokens ?? null,
+        outcome: 'done',
+        endedAt: now,
+        prefillRate: null,
+        decodeRate,
+      };
+    };
+    const seen = new Set();
+    for (const [index, s] of slots.entries()) {
+      const id = String(s.id ?? index);
+      seen.add(id);
+      const rawTask = s.id_task;
+      const task = rawTask == null || Number(rawTask) < 0 ? null : String(rawTask);
+      const decoded = finite(s.next_token?.[0]?.n_decoded);
+      const nPrompt = finite(s.n_prompt_tokens);
+      let tr = rt.slots.get(id);
+      if (task == null) {
+        // Idle slot with no task id: finish a tracked request from what the
+        // slot still reports.
+        if (tr && !tr.finished && !s.is_processing) finish(tr, decoded, nPrompt);
+        continue;
+      }
+      if (tr && tr.task !== task) {
+        if (!tr.finished) finish(tr, null, null);
+        rt.slots.delete(id);
+        tr = null;
+      }
+      if (s.is_processing) {
+        // A finished tracker with the same task id means the id was reused
+        // (e.g. server restart), so it is a new request.
+        if (!tr || tr.finished) {
+          tr = { task, firstSeen: now, firstDecoded: null, finished: false, model, baseline: !rt.baselined };
+          rt.slots.set(id, tr);
+        }
+        tr.lastSeen = now;
+        if (decoded != null) {
+          tr.lastDecoded = decoded;
+          tr.lastDecodedAt = now;
+          // Decode window starts at the first sample with output, excluding prefill.
+          if (tr.firstDecoded == null && decoded > 0) {
+            tr.firstDecoded = decoded;
+            tr.firstDecodedAt = now;
+          }
+        }
+        if (nPrompt != null) tr.nPrompt = nPrompt;
+      } else if (tr) {
+        if (!tr.finished) finish(tr, decoded, nPrompt);
+      } else {
+        // New id_task seen only while idle: the request finished between polls.
+        // Count it with the retained token counts; timing is unknown (null).
+        tr = { task, firstSeen: null, finished: true, nPrompt };
+        rt.slots.set(id, tr);
+        if (rt.baselined) {
+          rt.count += 1;
+          rt.last = {
+            model: model ?? null,
+            runtimeMs: null,
+            promptTokens: nPrompt,
+            genTokens: decoded,
+            outcome: 'done',
+            endedAt: now,
+            prefillRate: null,
+            decodeRate: null,
+          };
+        }
+      }
+    }
+    for (const id of [...rt.slots.keys()]) if (!seen.has(id)) rt.slots.delete(id);
+    rt.baselined = true;
   }
 
   // Tokens decoded since the previous poll, over wall-clock. Only slots that are
@@ -158,9 +270,20 @@ export class LlamaCppProvider {
           const slots = arr.filter((s) => s && typeof s === 'object');
           result.slots = { busy: slots.filter((s) => s.is_processing).length, total: slots.length };
           result.kv = this.kvFromSlots(slots);
-          liveDecode = this.liveDecodeRate(slots, Date.now());
+          const polledAt = Date.now();
+          liveDecode = this.liveDecodeRate(slots, polledAt);
+          this.trackRequests(slots, polledAt, modelId);
         }
       } catch {}
+    }
+
+    // Only reported when metrics are unavailable (disabled or /metrics failing),
+    // so the metrics-on display is unchanged. The count is since monitor start.
+    // lastRequest persists across polls so the last finished request stays visible.
+    if (this.reqTrack.baselined && (props.endpoint_metrics === false || !metricsRes.ok)) {
+      result.requestCountTotal = this.reqTrack.count;
+      result.requestCountSince = 'monitor start';
+      if (this.reqTrack.last) result.lastRequest = this.reqTrack.last;
     }
 
     if (props.endpoint_metrics === false) {

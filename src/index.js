@@ -426,7 +426,7 @@ async function snapshot(provider, sampled) {
         L.push(`  request state  ${activity.join('  ')}`);
       }
       if (v.requestCountTotal != null) {
-        L.push(`  requests completed  ${v.requestCountTotal}`);
+        L.push(`  requests completed  ${v.requestCountTotal}${v.requestCountSince ? ` since ${v.requestCountSince} (from /slots)` : ''}`);
       }
       if (v.running != null || v.waiting != null) {
         L.push(`  requests  ${v.running ?? '—'} processing  ${v.waiting ?? '—'} deferred`);
@@ -463,11 +463,29 @@ async function snapshot(provider, sampled) {
           request.push(`output ${r.genTokens} tok`);
         }
         L.push(`  last request  ${request.join('  ') || 'no telemetry'}`);
+      }
+      // llama.cpp: a live /slots rate is shown beside lastRequest (or the
+      // metrics hint), since the metrics-on branch below only runs without it.
+      const liveExtra =
+        v.rateLive && v.decodeRate != null && (v.lastRequest || v.metricsDisabled || v.metricsError);
+      if (liveExtra) {
+        L.push(`  throughput (live)  prefill ${rate(v.promptRate)}  decode ${rate(v.decodeRate)}`);
+      }
+      const perRequest = (v.metricsDisabled || v.metricsError) && v.requestCountSince;
+      if (perRequest) {
+        if (!v.lastRequest && !liveExtra) {
+          L.push('  throughput (per request, from /slots)  waiting for first request…');
+        }
+        L.push(
+          `  ${v.metricsDisabled ? 'metrics endpoint off' : `metrics endpoint error: ${v.metricsError}`} · prefill rate & cache hit unavailable`
+        );
       } else if (v.metricsDisabled) {
         L.push('  throughput unavailable (server started without --metrics)');
+      } else if (v.lastRequest) {
+        if (v.metricsError) L.push(`  throughput unavailable (/metrics ${v.metricsError})`);
       } else if (v.telemetryUnavailable) {
         L.push(`  throughput unavailable (${v.telemetryUnavailable})`);
-      } else if (v.promptRate != null || v.decodeRate != null) {
+      } else if (!liveExtra && (v.promptRate != null || v.decodeRate != null)) {
         // Live when differenced from /slots mid-generation; otherwise the
         // server's own average for the last request that completed.
         L.push(
@@ -633,10 +651,12 @@ async function loop(provider) {
         track('requestDecodeRate', v.lastRequest.decodeRate);
       }
       lastRequestCount = v.requestCountTotal;
-    } else {
+    }
+    if (v.requestCountTotal == null || v.rateLive) {
       // Ollama's rate comes from the last logged request, llama.cpp's and vLLM's
       // from counters, so fall through rather than keying on the result shape.
-      track('decodeRate', v.loaded ? (v.lastRequest?.decodeRate ?? v.decodeRate) : v.decodeRate);
+      // A live /slots rate is tracked even when per-request counts are present.
+      track('decodeRate', v.rateLive ? v.decodeRate : v.loaded ? (v.lastRequest?.decodeRate ?? v.decodeRate) : v.decodeRate);
     }
     lastSample = sampled;
     renderFrame();

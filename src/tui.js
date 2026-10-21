@@ -491,7 +491,7 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
       rt.push(`${col('state', 10)}${activity.join('   ')}`);
     }
     if (v.requestCountTotal != null) {
-      rt.push(`${col('completed', 10)}${BOLD}${v.requestCountTotal}${RESET} ${MUTE}requests${RESET}`);
+      rt.push(`${col('completed', 10)}${BOLD}${v.requestCountTotal}${RESET} ${MUTE}requests${v.requestCountSince ? ` since ${v.requestCountSince}` : ''}${RESET}${v.requestCountSince ? ` ${MUTE}(from /slots)${RESET}` : ''}`);
     }
     // Only llama.cpp reports these; Ollama's queue depth is not observable.
     if (v.running != null || v.waiting != null) {
@@ -557,13 +557,34 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
           `${trendPrefix}${ACC}${spark(history.decodeRate, undefined, sparkWidth(trendPrefix))}${RESET}`
         );
       }
+    }
+    // llama.cpp: a live /slots rate is shown beside lastRequest (or the metrics
+    // hint), since the metrics-on branch below only runs without it.
+    const liveExtra =
+      v.rateLive && v.decodeRate != null && (v.lastRequest || v.metricsDisabled || v.metricsError);
+    if (liveExtra) {
+      tp.push(
+        `${MUTE}live prefill${RESET} ${BOLD}${rate(v.promptRate)}${RESET}    ` +
+          `${MUTE}decode${RESET} ${BOLD}${rate(v.decodeRate)}${RESET}`
+      );
+    }
+    const perRequest = (v.metricsDisabled || v.metricsError) && v.requestCountSince;
+    if (perRequest) {
+      if (!v.lastRequest && !liveExtra) tp.push(`${MUTE}waiting for first request…${RESET}`);
+      tp.push(
+        `${MUTE}${v.metricsDisabled ? 'metrics endpoint off' : `metrics endpoint error: ${v.metricsError}`} · prefill rate & cache hit unavailable${RESET}`
+      );
     } else if (v.metricsDisabled) {
       tp.push(
         `${WARN}metrics endpoint disabled${RESET} ${MUTE}(restart llama-server with --metrics)${RESET}`
       );
+    } else if (v.lastRequest) {
+      if (v.metricsError) {
+        tp.push(`${WARN}throughput unavailable${RESET} ${MUTE}(/metrics ${v.metricsError})${RESET}`);
+      }
     } else if (v.telemetryUnavailable) {
       tp.push(`${WARN}throughput unavailable${RESET} ${MUTE}(${v.telemetryUnavailable})${RESET}`);
-    } else if (v.promptRate != null || v.decodeRate != null) {
+    } else if (!liveExtra && (v.promptRate != null || v.decodeRate != null)) {
       tp.push(
         `${MUTE}prefill${RESET} ${BOLD}${rate(v.promptRate)}${RESET}    ` +
           `${MUTE}decode${RESET} ${BOLD}${rate(v.decodeRate)}${RESET}`
@@ -583,10 +604,16 @@ export function renderTui(provider, gpus, v, history, opts = {}) {
     }
     // Only llama.cpp mid-generation produces a live rate; every other source
     // here — its committed gauge, Ollama's log figure — describes the request
-    // that finished most recently, so the heading is a straight either/or.
+    // that finished most recently. With both shown, the heading stays neutral.
     L.push(
       ...box(
-        v.rateLive ? 'Throughput  (live)' : 'Throughput  (last completed request)',
+        v.rateLive && v.lastRequest
+          ? 'Throughput'
+          : v.rateLive
+            ? 'Throughput  (live)'
+            : perRequest
+              ? 'Throughput  (per request, from /slots)'
+              : 'Throughput  (last completed request)',
         tp,
         WARN
       )
